@@ -18,6 +18,7 @@ import { errorHandler } from './middleware/errorHandler.middleware';
 import outboundRoutes from './routes/outbound.routes';
 import customerRoutes from './routes/customer.routes'; 
 import dashboardRoutes from './routes/dashboard.routes';
+import { isDbReady } from "./config/database";
 
 const app: Express = express();
 const PORT = process.env.PORT || 5000;
@@ -34,6 +35,17 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+
+// 🚧 Ensure DB is ready before hitting any API
+app.use((req, res, next) => {
+  if (!isDbReady()) {
+    return res.status(503).json({
+      error: "Database not ready. Reconnecting...",
+      timestamp: new Date()
+    });
+  }
+  next();
+});
 
 // 🔥 COOKIE PARSER MUST COME BEFORE ROUTES
 app.use(cookieParser());
@@ -86,6 +98,7 @@ app.use(errorHandler);
 })();
 
 export default app;
+
 
 
 
