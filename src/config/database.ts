@@ -1,85 +1,105 @@
 import { Pool } from 'pg';
 import dns from 'dns';
 
-dns.setDefaultResultOrder('ipv4first'); // Fix for Render/Supabase IPv6 issues
+dns.setDefaultResultOrder('ipv4first');
 
 let pool: Pool | null = null;
-let reconnecting = false; // prevent multiple reconnections
+let reconnecting = false;
+let dbReady = false;
 
 export const initializeDatabase = async (): Promise<Pool> => {
   const dbUrl = process.env.DATABASE_URL;
-
   if (!dbUrl) {
-    console.error('❌ FATAL: DATABASE_URL not set');
+    console.error("❌ DATABASE_URL not set.");
     process.exit(1);
   }
 
-  // If already connected and healthy, reuse it
-  if (pool) {
-    console.log('ℹ️ Database pool already initialized.');
-    return pool;
-  }
+  if (pool && dbReady) return pool;
 
-  console.log('🔌 Initializing database pool...');
+  console.log("🔌 Initializing database pool...");
 
-  pool = new Pool({
+  const 
+    newPool = new Pool({
     connectionString: dbUrl,
     ssl: { rejectUnauthorized: false },
+
+    // MOST IMPORTANT for Supabase:
+    keepAlive: true,      
+    keepAliveInitialDelayMillis: 10000,
+
     max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 0,
+    connectionTimeoutMillis: 7000,
+
+    statement_timeout: 0,
+    query_timeout: 0,
   });
 
-  pool.on('error', async (err) => {
-    console.error('⚠️ Unexpected database pool error:', err.message);
-
-    if (!reconnecting) {
-      reconnecting = true;
-      console.log('🔁 Attempting to reconnect to database in 5s...');
-      pool?.end().catch(() => null);
-      pool = null;
-      setTimeout(async () => {
-        try {
-          await initializeDatabase();
-          console.log('✅ Database reconnected successfully.');
-        } catch (e) {
-          console.error('❌ Reconnection failed:', (e as Error).message);
-        } finally {
-          reconnecting = false;
-        }
-      }, 5000);
-    }
-  });
-
+  // test connection before assigning
   try {
-    const result = await pool.query('SELECT NOW()');
-    console.log('✅ Database Connected Successfully at:', result.rows[0].now);
+    const test = await newPool.query("SELECT NOW()");
+    console.log("✅ Database Connected Successfully at:", test.rows[0].now);
+
+    pool = newPool;
+    dbReady = true;
+
+    newPool.on("error", handlePoolError);
+
     return pool;
-  } catch (error) {
-    console.error('❌ Database Connection Error:', (error as Error).message);
-    console.log('🔁 Retrying connection in 5 seconds...');
+  } catch (err) {
+    console.error("❌ Database connection failed:", (err as Error).message);
+    dbReady = false;
+
     setTimeout(() => initializeDatabase().catch(console.error), 5000);
-    throw error;
+
+    throw err;
   }
 };
 
+async function handlePoolError(err: Error) {
+  console.error("⚠️ Database pool error:", err.message);
+
+  if (reconnecting) return;
+  reconnecting = true;
+  dbReady = false;
+
+  console.log("🔁 Attempting to reconnect in 5s...");
+
+  try {
+    await pool?.end();
+  } catch {}
+
+  pool = null;
+
+  setTimeout(async () => {
+    try {
+      await initializeDatabase();
+      console.log("✅ Database reconnected.");
+    } catch (e) {
+      console.error("❌ Reconnection failed:", (e as Error).message);
+    } finally {
+      reconnecting = false;
+    }
+  }, 5000);
+}
+
 export const getPool = (): Pool => {
-  if (!pool) throw new Error('Database not initialized');
+  if (!dbReady || !pool) {
+    throw new Error("Database not ready");
+  }
   return pool;
 };
 
 export const query = async (text: string, params?: any[]) => {
-  const currentPool = getPool();
-  try {
-    return await currentPool.query(text, params);
-  } catch (err: any) {
-    console.error('❌ Query execution error:', err.message);
-    throw err;
-  }
+  const p = getPool();
+  return p.query(text, params);
 };
+
+export const isDbReady = () => dbReady;
 
 export default {
   initializeDatabase,
   getPool,
   query,
+  isDbReady,
 };
