@@ -4,32 +4,57 @@ import { query } from '../config/database';
 // Get complete inventory pipeline with all stages
 export const getInventoryPipeline = async (req: Request, res: Response) => {
   try {
-    const { warehouseId, page = 1, limit = 50, search, stage, brand, dateFrom, dateTo } = req.query;
+    const { warehouseId, page = 1, limit = 50, search, stage, brand, category, dateFrom, dateTo } = req.query;
 
     if (!warehouseId) {
-      return res.status(400).json({ error: 'Warehouse ID required' });
+      return res.status(400).json({ error: "Warehouse ID required" });
     }
 
     const offset = (Number(page) - 1) * Number(limit);
-    const conditions: string[] = ['i.warehouse_id = $1'];
+    const conditions: string[] = ["i.warehouse_id = $1"];
     const params: any[] = [warehouseId];
     let paramIndex = 2;
 
-    // Search filter
+    /* 🔎 SEARCH */
     if (search) {
       conditions.push(`(i.wsn ILIKE $${paramIndex} OR i.product_title ILIKE $${paramIndex})`);
       params.push(`%${search}%`);
       paramIndex++;
     }
 
-    // Brand filter
+    /* 🏷 BRAND */
     if (brand) {
-      conditions.push(`i.brand ILIKE $${paramIndex}`);
-      params.push(`%${brand}%`);
+      conditions.push(`i.brand = $${paramIndex}`);
+      params.push(brand);
       paramIndex++;
     }
 
-    // Date range filter
+    /* 📂 CATEGORY */
+    if (category) {
+      conditions.push(`i.cms_vertical = $${paramIndex}`);
+      params.push(category);
+      paramIndex++;
+    }
+
+    /* 🔥 STAGE FILTER — 100% CORRECT NOW */
+    if (stage && stage !== "all") {
+      conditions.push(`(
+        CASE
+          WHEN o.id IS NOT NULL AND o.dispatch_date IS NULL THEN 'OUTBOUND_READY'
+          WHEN o.id IS NOT NULL THEN 'OUTBOUND_DISPATCHED'
+          WHEN p.id IS NOT NULL AND p.picking_date IS NULL THEN 'PICKING_PENDING'
+          WHEN p.id IS NOT NULL THEN 'PICKING_COMPLETED'
+          WHEN q.id IS NOT NULL AND q.fk_grade = 'PASS' THEN 'QC_PASSED'
+          WHEN q.id IS NOT NULL AND q.fk_grade = 'FAIL' THEN 'QC_FAILED'
+          WHEN q.id IS NOT NULL THEN 'QC_PENDING'
+          ELSE 'INBOUND_RECEIVED'
+        END
+      ) = $${paramIndex}`);
+      params.push(stage);
+      paramIndex++;
+    }
+
+    /* 📅 DATE FILTERS */
     if (dateFrom) {
       conditions.push(`i.inbound_date >= $${paramIndex}`);
       params.push(dateFrom);
@@ -42,53 +67,71 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
       paramIndex++;
     }
 
-    const whereClause = conditions.join(' AND ');
+    const whereClause = conditions.join(" AND ");
 
-    // Count query
+    /* COUNT QUERY */
     const countSql = `
       SELECT COUNT(*)
       FROM inbound i
+      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
+      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
+      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
       WHERE ${whereClause}
     `;
 
     const countResult = await query(countSql, params);
-    const total = parseInt(countResult.rows[0].count);
+    const total = Number(countResult.rows[0].count);
 
-    // Main query with all joins
+    /* MAIN DATA QUERY — FIXED & CLEAN */
     const sql = `
       SELECT
-        i.id as inbound_id,
+        i.id AS inbound_id,
         i.wsn,
+        i.wid,
+        i.fsn,
+        i.order_id,
         i.product_title,
         i.brand,
         i.cms_vertical,
         i.mrp,
         i.fsp,
         i.inbound_date,
-        'INBOUND_RECEIVED' as inbound_status,
+        'INBOUND_RECEIVED' AS inbound_status,
         i.rack_no,
-        i.wh_location as warehouse_location,
-        q.id as qc_id,
+        i.wh_location AS warehouse_location,
+        i.hsn_sac,
+        i.igst_rate,
+        i.invoice_date,
+        i.fkt_link,
+        i.p_type,
+        i.p_size,
+        i.vrp,
+        i.yield_value,
+        i.fkqc_remark,
+        i.fk_grade,
+        q.id AS qc_id,
         q.qc_date,
-        COALESCE(q.qc_remarks, 'Pending') as qc_status,
-        q.fk_grade as qc_grade,
-        p.id as picking_id,
+        COALESCE(q.qc_remarks, 'Pending') AS qc_status,
+        p.id AS picking_id,
         p.picking_date,
-        COALESCE(p.picking_remarks, 'Pending') as picking_status,
-        o.id as outbound_id,
-        o.dispatch_date as outbound_date,
-        COALESCE(o.dispatch_remarks, 'Pending') as outbound_status,
+        COALESCE(p.picking_remarks, 'Pending') AS picking_status,
+        o.id AS outbound_id,
+        o.dispatch_date AS outbound_date,
+        COALESCE(o.dispatch_remarks, 'Pending') AS outbound_status,
         o.vehicle_no,
+
+        /* ⭐ FINAL FIXED STAGE LOGIC */
         CASE
-          WHEN o.id IS NOT NULL THEN 'OUTBOUND_DISPATCHED'
           WHEN o.id IS NOT NULL AND o.dispatch_date IS NULL THEN 'OUTBOUND_READY'
-          WHEN p.id IS NOT NULL THEN 'PICKING_COMPLETED'
+          WHEN o.id IS NOT NULL THEN 'OUTBOUND_DISPATCHED'
           WHEN p.id IS NOT NULL AND p.picking_date IS NULL THEN 'PICKING_PENDING'
+          WHEN p.id IS NOT NULL THEN 'PICKING_COMPLETED'
           WHEN q.id IS NOT NULL AND q.fk_grade = 'PASS' THEN 'QC_PASSED'
           WHEN q.id IS NOT NULL AND q.fk_grade = 'FAIL' THEN 'QC_FAILED'
           WHEN q.id IS NOT NULL THEN 'QC_PENDING'
           ELSE 'INBOUND_RECEIVED'
-        END as current_stage
+        END AS current_stage
+
       FROM inbound i
       LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
       LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
@@ -102,18 +145,19 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
 
     const result = await query(sql, params);
 
-    res.json({
+    return res.json({
       data: result.rows,
       pagination: {
         page: Number(page),
         limit: Number(limit),
         total,
-        totalPages: Math.ceil(total / Number(limit))
-      }
+        totalPages: Math.ceil(total / Number(limit)),
+      },
     });
+
   } catch (error: any) {
-    console.error('Get inventory pipeline error:', error);
-    res.status(500).json({ error: error.message });
+    console.error("Get inventory pipeline error:", error);
+    return res.status(500).json({ error: error.message });
   }
 };
 
