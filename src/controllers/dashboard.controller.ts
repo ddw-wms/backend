@@ -55,17 +55,21 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
     }
 
     /* 📅 DATE FILTERS */
-    if (dateFrom) {
-      conditions.push(`i.inbound_date >= $${paramIndex}`);
+    if (dateFrom && dateTo) {
+      conditions.push(`i.inbound_date::text BETWEEN $${paramIndex} AND $${paramIndex + 1}`);
+      params.push(dateFrom, dateTo);
+      paramIndex += 2;
+    } else if (dateFrom) {
+      conditions.push(`i.inbound_date::text >= $${paramIndex}`);
       params.push(dateFrom);
-      paramIndex++;
+      paramIndex += 1;
+    } else if (dateTo) {
+      conditions.push(`i.inbound_date::text <= $${paramIndex}`);
+      params.push(dateTo);
+      paramIndex += 1;
     }
 
-    if (dateTo) {
-      conditions.push(`i.inbound_date <= $${paramIndex}`);
-      params.push(dateTo);
-      paramIndex++;
-    }
+
 
     const whereClause = conditions.join(" AND ");
 
@@ -170,7 +174,12 @@ export const getInventoryMetrics = async (req: Request, res: Response) => {
     }
 
     const sql = `
-      WITH inbound_count AS (
+      WITH master_count AS (
+        -- Master Data total (global, warehouse_id column nahi hai)
+        SELECT COUNT(*) as total FROM master_data
+      ),
+      inbound_count AS (
+        -- Inbound per warehouse (jaisa pehle tha)
         SELECT COUNT(*) as total FROM inbound WHERE warehouse_id = $1
       ),
       qc_count AS (
@@ -193,24 +202,26 @@ export const getInventoryMetrics = async (req: Request, res: Response) => {
         FROM outbound WHERE warehouse_id = $1
       )
       SELECT
-        COALESCE(ic.total, 0) as total,
-        COALESCE(ic.total, 0) as inbound,
-        COALESCE(qc.qcPending, 0) as qcPending,
-        COALESCE(qc.qcPassed, 0) as qcPassed,
-        COALESCE(qc.qcFailed, 0) as qcFailed,
-        COALESCE(p.pickingPending, 0) as pickingPending,
-        COALESCE(p.pickingCompleted, 0) as pickingCompleted,
-        COALESCE(o.outboundReady, 0) as outboundReady,
+        COALESCE(mc.total, 0)  as masterTotal,
+        COALESCE(ic.total, 0)  as inboundTotal,
+        COALESCE(qc.qcPending, 0)        as qcPending,
+        COALESCE(qc.qcPassed, 0)         as qcPassed,
+        COALESCE(qc.qcFailed, 0)         as qcFailed,
+        COALESCE(p.pickingPending, 0)    as pickingPending,
+        COALESCE(p.pickingCompleted, 0)  as pickingCompleted,
+        COALESCE(o.outboundReady, 0)     as outboundReady,
         COALESCE(o.outboundDispatched, 0) as outboundDispatched
-      FROM inbound_count ic, qc_count qc, picking_count p, outbound_count o
+      FROM master_count mc, inbound_count ic, qc_count qc, picking_count p, outbound_count o
     `;
 
     const result = await query(sql, [warehouseId]);
     const metrics = result.rows[0];
 
     res.json({
-      total: parseInt(metrics.total) || 0,
-      inbound: parseInt(metrics.inbound) || 0,
+      // Master Data total (export / uploads se aayega, inbound ke bina bhi)
+      total: parseInt(metrics.mastertotal) || 0,
+      // Inbound total alag se
+      inbound: parseInt(metrics.inboundtotal) || 0,
       qcPending: parseInt(metrics.qcpending) || 0,
       qcPassed: parseInt(metrics.qcpassed) || 0,
       qcFailed: parseInt(metrics.qcfailed) || 0,
@@ -271,8 +282,8 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
       stage,
       brand,
       category,
-      searchText
-    } = req.query;
+      search: searchText,   // 🔁 rename: frontend 'search' -> searchText
+    } = req.query as any;
 
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
@@ -285,10 +296,20 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
 
     // Date filter
     if (dateFrom && dateTo) {
-      whereConditions.push(`i.inbound_date BETWEEN $${paramIndex} AND $${paramIndex + 1}`);
+      whereConditions.push(`i.inbound_date::text BETWEEN $${paramIndex} AND $${paramIndex + 1}`);
       params.push(dateFrom, dateTo);
       paramIndex += 2;
+    } else if (dateFrom) {
+      whereConditions.push(`i.inbound_date::text >= $${paramIndex}`);
+      params.push(dateFrom);
+      paramIndex += 1;
+    } else if (dateTo) {
+      whereConditions.push(`i.inbound_date::text <= $${paramIndex}`);
+      params.push(dateTo);
+      paramIndex += 1;
     }
+
+
 
     // Brand filter
     if (brand && brand !== '') {
@@ -311,16 +332,16 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
       paramIndex++;
     }
 
-    // Stage filter
+    // Stage filter – ab list ke stage strings use nahi; export ke mapped strings use:
     let stageFilter = '';
     if (stage && stage !== 'all') {
-      if (stage === 'inbound') {
+      if (stage === 'INBOUND_RECEIVED') {
         stageFilter = 'AND (o.id IS NULL AND p.id IS NULL AND q.id IS NULL)';
-      } else if (stage === 'qc') {
-        stageFilter = 'AND (q.id IS NOT NULL AND p.id IS NULL)';
-      } else if (stage === 'picking') {
+      } else if (stage === 'QC_PASSED' || stage === 'QC_PENDING' || stage === 'QC_FAILED') {
+        stageFilter = 'AND (q.id IS NOT NULL AND p.id IS NULL AND o.id IS NULL)';
+      } else if (stage === 'PICKING_PENDING' || stage === 'PICKING_COMPLETED') {
         stageFilter = 'AND (p.id IS NOT NULL AND o.id IS NULL)';
-      } else if (stage === 'outbound') {
+      } else if (stage === 'OUTBOUND_READY' || stage === 'OUTBOUND_DISPATCHED') {
         stageFilter = 'AND (o.id IS NOT NULL)';
       }
     }
@@ -350,24 +371,20 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
         i.p_size,
         i.vrp,
         i.yield_value,
-        
-        -- QC Details - ✅ CAST DATE TO TEXT TO HANDLE NULL VALUES
+        -- QC Details
         COALESCE(q.qc_date::TEXT, '') as qc_date,
         COALESCE(q.qc_by, 'N/A') as qc_by,
         COALESCE(q.fk_grade, 'PENDING') as qc_grade,
         COALESCE(q.qc_remarks, '') as qc_remarks,
         COALESCE(q.fkqc_remark, '') as fkqc_remark,
-        
-        -- Picking Details - ✅ CAST DATE TO TEXT TO HANDLE NULL VALUES
+        -- Picking Details
         COALESCE(p.picking_date::TEXT, '') as picking_date,
         COALESCE(p.customer_name, '') as customer_name,
         COALESCE(p.picking_remarks, '') as picking_remarks,
-        
-        -- Outbound Details - ✅ CAST DATE TO TEXT TO HANDLE NULL VALUES + FIXED COLUMN NAME
+        -- Outbound Details
         COALESCE(o.dispatch_date::TEXT, '') as dispatch_date,
         COALESCE(o.vehicle_no, '') as dispatch_vehicle,
         COALESCE(o.dispatch_remarks, '') as dispatch_remarks,
-        
         -- Status
         CASE
           WHEN o.id IS NOT NULL THEN 'DISPATCHED'
@@ -375,20 +392,16 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
           WHEN q.id IS NOT NULL THEN 'QC_DONE'
           ELSE 'INBOUND'
         END as current_status,
-        
         -- Batch Info
         COALESCE(i.batch_id, 'SINGLE') as batch_id,
         i.created_at,
         COALESCE(i.created_user_name, 'System') as created_by
-        
       FROM inbound i
       LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
       LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
       LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
-      
       WHERE ${whereClause}
       ${stageFilter}
-      
       ORDER BY i.created_at DESC
     `;
 
@@ -400,7 +413,6 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
       data: result.rows,
       exportedAt: new Date().toISOString()
     });
-
   } catch (error: any) {
     console.error('Export data error:', error);
     res.status(500).json({ error: error.message });
