@@ -77,9 +77,11 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
     const countSql = `
       SELECT COUNT(*)
       FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
       LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
       LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
       LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+
       WHERE ${whereClause}
     `;
 
@@ -91,28 +93,28 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
       SELECT
         i.id AS inbound_id,
         i.wsn,
-        i.wid,
-        i.fsn,
-        i.order_id,
-        i.product_title,
-        i.brand,
-        i.cms_vertical,
-        i.mrp,
-        i.fsp,
+        m.wid,
+        m.fsn,
+        m.order_id,
+        m.product_title,
+        m.brand,
+        m.cms_vertical,
+        m.mrp,
+        m.fsp,
         i.inbound_date,
         'INBOUND_RECEIVED' AS inbound_status,
         i.rack_no,
-        i.wh_location AS warehouse_location,
-        i.hsn_sac,
-        i.igst_rate,
-        i.invoice_date,
-        i.fkt_link,
-        i.p_type,
-        i.p_size,
-        i.vrp,
-        i.yield_value,
-        i.fkqc_remark,
-        i.fk_grade,
+        m.wh_location AS warehouse_location,
+        m.hsn_sac,
+        m.igst_rate,
+        m.invoice_date,
+        m.fkt_link,
+        m.p_type,
+        m.p_size,
+        m.vrp,
+        m.yield_value,
+        m.fkqc_remark,
+        m.fk_grade,
         q.id AS qc_id,
         q.qc_date,
         COALESCE(q.qc_remarks, 'Pending') AS qc_status,
@@ -136,10 +138,12 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
           ELSE 'INBOUND_RECEIVED'
         END AS current_stage
 
-      FROM inbound i
-      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
-      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
-      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+        FROM inbound i
+        LEFT JOIN master_data m ON m.wsn = i.wsn
+        LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
+        LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
+        LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+
       WHERE ${whereClause}
       ORDER BY i.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -397,9 +401,11 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
         i.created_at,
         COALESCE(i.created_user_name, 'System') as created_by
       FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
       LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
       LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
       LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+
       WHERE ${whereClause}
       ${stageFilter}
       ORDER BY i.created_at DESC
