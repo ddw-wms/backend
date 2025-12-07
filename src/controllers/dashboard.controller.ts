@@ -24,14 +24,14 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
 
     /* 🏷 BRAND */
     if (brand) {
-      conditions.push(`i.brand = $${paramIndex}`);
+      conditions.push(`m.brand = $${paramIndex}`);
       params.push(brand);
       paramIndex++;
     }
 
     /* 📂 CATEGORY */
     if (category) {
-      conditions.push(`i.cms_vertical = $${paramIndex}`);
+      conditions.push(`m.cms_vertical = $${paramIndex}`);
       params.push(category);
       paramIndex++;
     }
@@ -317,14 +317,14 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
 
     // Brand filter
     if (brand && brand !== '') {
-      whereConditions.push(`i.brand = $${paramIndex}`);
+      whereConditions.push(`m.brand = $${paramIndex}`);
       params.push(brand);
       paramIndex++;
     }
 
     // Category filter
     if (category && category !== '') {
-      whereConditions.push(`i.cms_vertical = $${paramIndex}`);
+      whereConditions.push(`m.cms_vertical = $${paramIndex}`);
       params.push(category);
       paramIndex++;
     }
@@ -355,26 +355,26 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
     const sql = `
       SELECT
         i.wsn,
-        i.wid,
-        i.fsn,
-        i.order_id,
-        i.product_title,
-        i.brand,
-        i.cms_vertical,
-        i.fsp,
-        i.mrp,
+        m.wid,
+        m.fsn,
+        m.order_id,
+        m.product_title,
+        m.brand,
+        m.cms_vertical,
+        m.fsp,
+        m.mrp,
         i.inbound_date,
         i.vehicle_no,
         i.rack_no,
-        i.wh_location,
-        i.hsn_sac,
-        i.igst_rate,
-        i.invoice_date,
-        i.fkt_link,
-        i.p_type,
-        i.p_size,
-        i.vrp,
-        i.yield_value,
+        m.wh_location,
+        m.hsn_sac,
+        m.igst_rate,
+        m.invoice_date,
+        m.fkt_link,
+        m.p_type,
+        m.p_size,
+        m.vrp,
+        m.yield_value,
         -- QC Details
         COALESCE(q.qc_date::TEXT, '') as qc_date,
         COALESCE(q.qc_by, 'N/A') as qc_by,
@@ -424,3 +424,4 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
     res.status(500).json({ error: error.message });
   }
 };
+
