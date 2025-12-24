@@ -122,10 +122,12 @@ export const createInboundEntry = async (req: Request, res: Response) => {
 // GET MASTER DATA BY WSN
 export const getMasterDataByWSN = async (req: Request, res: Response) => {
   try {
-    const { wsn } = req.params;
+    let { wsn } = req.params;
+    if (!wsn) return res.status(400).json({ error: 'WSN is required' });
+    wsn = wsn.toUpperCase();
     console.log('🔍 Searching WSN:', wsn);
 
-    const sql = `SELECT * FROM master_data WHERE wsn = $1 LIMIT 1`;
+    const sql = `SELECT * FROM master_data WHERE UPPER(wsn) = $1 LIMIT 1`;
     const result = await query(sql, [wsn]);
 
     if (result.rows.length === 0) {
