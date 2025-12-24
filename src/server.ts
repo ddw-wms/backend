@@ -33,7 +33,7 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://divinewms.vercel.app'
+    'https://backend-ho59.onrender.com'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -132,5 +132,6 @@ app.use(errorHandler);
     process.exit(1);
   }
 })();
+
 
 export default app;
