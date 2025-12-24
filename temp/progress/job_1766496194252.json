@@ -1,0 +1,1 @@
+{"status":"failed","error":"Excel header format does not match required columns. Expected exact order: WSN, WID, FSN, Order_ID, FKQC_Remark, FK_Grade, Product_Title, HSN/SAC, IGST_Rate, FSP, MRP, Invoice_Date, Fkt_Link, Wh_Location, BRAND, cms_vertical, VRP, Yield_Value, P_Type, P_Size","batchId":"BULK_1766496194252_I0SR0I"}
