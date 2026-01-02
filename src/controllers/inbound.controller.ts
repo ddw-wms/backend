@@ -1,0 +1,952 @@
+// File Path = warehouse-backend/src/controllers/inbound.controller.ts
+import { Request, Response } from 'express';
+import { query } from '../config/database';
+import { generateBatchId } from '../utils/helpers';
+import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import fs from 'fs';
+
+// SINGLE ENTRY 
+export const createInboundEntry = async (req: Request, res: Response) => {
+  try {
+    const {
+      wsn,
+      inbound_date,
+      vehicle_no,
+      product_serial_number,
+      rack_no,
+      unload_remarks,
+      warehouse_id,
+      update_existing,
+    } = req.body;
+
+    const userId = (req as any).user?.id;
+    const userName = (req as any).user?.full_name ||
+      (req as any).user?.name ||
+      (req as any).user?.username ||
+      'Unknown';
+
+    console.log('📦 Creating single inbound entry:', { wsn, warehouse_id });
+
+    // Check if WSN exists in ANY warehouse
+    const checkAnySql = `SELECT id, warehouse_id FROM inbound WHERE wsn = $1 LIMIT 1`;
+    const checkAnyResult = await query(checkAnySql, [wsn]);
+
+    if (checkAnyResult.rows.length > 0) {
+      const existingWarehouse = checkAnyResult.rows[0].warehouse_id;
+
+      if (existingWarehouse !== Number(warehouse_id)) {
+        return res.status(403).json({
+          error: 'WSN already inbound in different warehouse.',
+          existingWarehouseId: existingWarehouse,
+        });
+      }
+
+      if (!update_existing) {
+        return res.status(409).json({
+          error: 'Duplicate WSN in same warehouse',
+          existingId: checkAnyResult.rows[0].id,
+        });
+      }
+
+      // Update existing - inbound fields only
+      const updateSql = `
+        UPDATE inbound 
+        SET inbound_date = $1,
+            vehicle_no = $2,
+            product_serial_number = $3,
+            rack_no = $4,
+            unload_remarks = $5,
+            updated_at = NOW()
+        WHERE id = $6
+        RETURNING *
+      `;
+      const updateResult = await query(updateSql, [
+        inbound_date,
+        vehicle_no,
+        product_serial_number,
+        rack_no,
+        unload_remarks,
+        checkAnyResult.rows[0].id,
+      ]);
+
+      console.log('✅ Inbound entry updated');
+      return res.json({ ...updateResult.rows[0], action: 'updated' });
+    }
+
+    // Get warehouse name
+    const whSql = `SELECT name FROM warehouses WHERE id = $1`;
+    const whResult = await query(whSql, [warehouse_id]);
+    const warehouseName = whResult.rows[0]?.name || '';
+
+    // ✅ Insert ONLY inbound-specific fields
+    const sql = `
+      INSERT INTO inbound (
+        wsn,
+        inbound_date,
+        vehicle_no,
+        product_serial_number,
+        rack_no,
+        unload_remarks,
+        warehouse_id,
+        warehouse_name,
+        created_by,
+        created_user_name
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+      )
+      RETURNING *
+    `;
+
+    const result = await query(sql, [
+      wsn,
+      inbound_date,
+      vehicle_no || null,
+      product_serial_number || null,
+      rack_no || null,
+      unload_remarks || null,
+      warehouse_id,
+      warehouseName,
+      userId,
+      userName,
+    ]);
+
+    console.log('✅ Single inbound entry created');
+    res.status(201).json({ ...result.rows[0], action: 'created' });
+  } catch (error: any) {
+    console.error('❌ Create inbound error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+// GET MASTER DATA BY WSN
+export const getMasterDataByWSN = async (req: Request, res: Response) => {
+  try {
+    let { wsn } = req.params;
+    if (!wsn) return res.status(400).json({ error: 'WSN is required' });
+    wsn = wsn.toUpperCase();
+    console.log('🔍 Searching WSN:', wsn);
+
+    const sql = `SELECT * FROM master_data WHERE UPPER(wsn) = $1 LIMIT 1`;
+    const result = await query(sql, [wsn]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'WSN not found in master data' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error: any) {
+    console.error('❌ Get master data error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+// BULK UPLOAD - with date normalization + error tracking
+export const bulkInboundUpload = async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { warehouse_id } = req.body;
+    const userId = (req as any).user?.id;
+    const userName = (req as any).user?.full_name ||
+      (req as any).user?.name ||
+      (req as any).user?.username ||
+      'Unknown';
+
+    const filePath = req.file.path;
+
+    // Use shared parser utility for safe Excel parsing
+    const buffer = await fs.promises.readFile(filePath);
+    const { parseExcelBuffer } = require('../utils/excelParser');
+    const data: any[] = await parseExcelBuffer(Buffer.from(buffer));
+
+    if (data.length === 0) {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: 'Excel file is empty' });
+    }
+
+    const batchId = generateBatchId('BULK');
+
+    res.status(202).json({
+      message: 'Upload started',
+      batchId,
+      totalRows: data.length,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Process in background
+    processInboundBulk(data, batchId, warehouse_id, userId, userName, filePath);
+  } catch (error: any) {
+    console.error('❌ Bulk upload error:', error);
+    if (req.file?.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (e) { }
+    }
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ✅ Date normalizer for any format No timezone issues
+const normalizeDate = (val: any): string | null => {
+  if (!val && val !== 0) return null;
+
+  // ✅ Excel SERIAL NUMBER - WITHOUT timezone conversion
+  if (typeof val === 'number' && val > 0) {
+    // Excel epoch: December 30, 1899
+    // Use getUTCFullYear/Month/Date to avoid timezone issues
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const resultDate = new Date(excelEpoch.getTime() + val * 24 * 60 * 60 * 1000);
+
+    const year = resultDate.getUTCFullYear();
+    const month = String(resultDate.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(resultDate.getUTCDate()).padStart(2, '0');
+
+    console.log(`📅 Excel Serial: ${val} → ${year}-${month}-${day}`);
+    return `${year}-${month}-${day}`;
+  }
+
+  // ✅ STRING FORMAT
+  if (typeof val === 'string') {
+    const s = val.trim();
+    if (!s) return null;
+
+    // yyyy-mm-dd
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    // dd-mm-yyyy
+    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) {
+      const [d, m, y] = s.split('-');
+      return `${y}-${m}-${d}`;
+    }
+
+    // dd/mm/yyyy
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+      const [d, m, y] = s.split('/');
+      return `${y}-${m}-${d}`;
+    }
+
+    // ✅ dd-MMM-yy (e.g., "01-Dec-25") - IMPORTANT! Excel exports as text
+    // Using case-insensitive and flexible regex
+    const monthRegex = /^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/;
+    const monthMatch = s.match(monthRegex);
+    if (monthMatch) {
+      const months: any = {
+        'jan': '01', 'january': '01',
+        'feb': '02', 'february': '02',
+        'mar': '03', 'march': '03',
+        'apr': '04', 'april': '04',
+        'may': '05',
+        'jun': '06', 'june': '06',
+        'jul': '07', 'july': '07',
+        'aug': '08', 'august': '08',
+        'sep': '09', 'september': '09',
+        'oct': '10', 'october': '10',
+        'nov': '11', 'november': '11',
+        'dec': '12', 'december': '12'
+      };
+
+      const d = monthMatch[1].padStart(2, '0');
+      const m = months[monthMatch[2].toLowerCase()];
+      const yy = monthMatch[3];
+      const y = yy.length === 2 ? `20${yy}` : yy;
+
+      if (m) {
+        console.log(`📅 Text Date: "${s}" → ${y}-${m}-${d}`);
+        return `${y}-${m}-${d}`;
+      }
+    }
+
+    // mm/dd/yyyy (US format)
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+      const parts = s.split('/');
+      if (parts[0].length <= 2 && parts[1].length <= 2) {
+        const m = String(parts[0]).padStart(2, '0');
+        const d = String(parts[1]).padStart(2, '0');
+        const y = parts[2];
+        return `${y}-${m}-${d}`;
+      }
+    }
+
+    // ✅ Fallback: Try JavaScript Date parsing with UTC
+    // Use UTC methods to avoid timezone conversion
+    const parsed = new Date(s);
+    if (!isNaN(parsed.getTime())) {
+      const year = parsed.getUTCFullYear();
+      const month = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(parsed.getUTCDate()).padStart(2, '0');
+      console.log(`📅 Parsed Date: "${s}" → ${year}-${month}-${day}`);
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  return null;
+};
+
+const normalizeKey = (key: string): string => {
+  return key
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
+};
+
+async function processInboundBulk(
+  data: any[],
+  batchId: string,
+  warehouseId: string,
+  userId: number,
+  userName: string,
+  filePath: string
+) {
+  const CHUNK_SIZE = 500;
+  let successCount = 0;
+  let duplicateCount = 0;
+  let crossWarehouseCount = 0;
+  let errorCount = 0;
+  const errorDetails: any[] = [];
+  const duplicateWSNs: string[] = [];
+  const crossWarehouseWSNs: string[] = [];
+
+  try {
+    // Get warehouse name
+    const whSql = `SELECT name FROM warehouses WHERE id = $1`;
+    const whResult = await query(whSql, [warehouseId]);
+    const warehouseName = whResult.rows[0]?.name || '';
+
+    // Collect WSN list
+    const wsns = data
+      .map((row: any) => row['WSN'] || row['wsn'])
+      .filter(Boolean)
+      .map((v: any) => String(v).trim());
+
+    // Check existing inbound
+    const existingMap = new Map<string, number>();
+    if (wsns.length > 0) {
+      const existingSql = `SELECT wsn, warehouse_id FROM inbound WHERE wsn = ANY($1)`;
+      const existingResult = await query(existingSql, [wsns]);
+      existingResult.rows.forEach((row: any) => {
+        existingMap.set(row.wsn, row.warehouse_id);
+      });
+    }
+
+    const validRows: any[] = [];
+
+    for (let idx = 0; idx < data.length; idx++) {
+      const row = data[idx];
+      const wsn = String(row['WSN'] || row['wsn'] || '').trim();
+
+      if (!wsn) {
+        errorCount++;
+        errorDetails.push({
+          row: idx + 2,
+          wsn: 'EMPTY',
+          error: 'WSN is required',
+        });
+        continue;
+      }
+
+      // Duplicate check
+      if (existingMap.has(wsn)) {
+        const existingWarehouseId = existingMap.get(wsn);
+        if (existingWarehouseId !== Number(warehouseId)) {
+          crossWarehouseWSNs.push(wsn);
+          crossWarehouseCount++;
+          errorDetails.push({
+            row: idx + 2,
+            wsn,
+            error: `Already inbound in warehouse ${existingWarehouseId}`,
+          });
+          continue;
+        } else {
+          duplicateWSNs.push(wsn);
+          duplicateCount++;
+          errorDetails.push({
+            row: idx + 2,
+            wsn,
+            error: 'Duplicate in same warehouse',
+          });
+          continue;
+        }
+      }
+
+      const getColumnValue = (row: any, possibleNames: string[]): any => {
+        const normalizedRow: any = {};
+        Object.keys(row).forEach(key => {
+          normalizedRow[normalizeKey(key)] = row[key];
+        });
+
+        for (const name of possibleNames) {
+          const normalized = normalizeKey(name);
+          if (normalizedRow[normalized] !== undefined && normalizedRow[normalized] !== null) {
+            return normalizedRow[normalized];
+          }
+        }
+        return null;
+      };
+
+      // ✅ FIXED: Handle XLSX date serial numbers properly
+      const inboundDateRaw = getColumnValue(row, [
+        'INBOUND_DATE',
+        'Inbound Date',
+        'inbound_date',
+        'inbound date',
+      ]);
+
+      // normalizeDate will handle both NUMBER and STRING formats
+
+
+      const vehicleNo = getColumnValue(row, [
+        'VEHICLE_NO',
+        'Vehicle No',
+        'vehicle_no',
+        'vehicle no',
+      ]);
+
+
+      const productSerialNumber = getColumnValue(row, [
+        'PRODUCT_SERIAL_NUMBER',
+        'Product Serial Number',
+        'product_serial_number',
+        'product serial number'
+      ]);
+
+      const rackNo = getColumnValue(row, [
+        'RACK_NO',
+        'Rack No',
+        'rack_no',
+        'rack no'
+      ]);
+
+      const unloadRemarks = getColumnValue(row, [
+        'UNLOAD_REMARKS',
+        'Unload Remarks',
+        'unload_remarks',
+        'unload remarks'
+      ]);
+
+      const normalizedDate = normalizeDate(inboundDateRaw);
+
+      validRows.push({
+        wsn,
+        inbound_date: normalizedDate,
+        vehicle_no: vehicleNo,
+        product_serial_number: productSerialNumber,
+        rack_no: rackNo,
+        unload_remarks: unloadRemarks,
+      });
+    }
+
+    console.log(
+      `📊 Valid: ${validRows.length}, Duplicates: ${duplicateCount}, Cross-warehouse: ${crossWarehouseCount}, Errors: ${errorCount}`
+    );
+
+    // Insert in chunks
+    for (let i = 0; i < validRows.length; i += CHUNK_SIZE) {
+      const chunk = validRows.slice(i, i + CHUNK_SIZE);
+
+      try {
+        const valuesClauses: string[] = [];
+        const params: any[] = [];
+        let paramIndex = 1;
+
+        for (const row of chunk) {
+          const rowParams = [
+            row.wsn,
+            row.inbound_date || new Date().toISOString().slice(0, 10),
+            row.vehicle_no,
+            row.product_serial_number,
+            row.rack_no,
+            row.unload_remarks,
+            warehouseId,
+            warehouseName,
+            batchId,
+            userId,
+            userName,
+          ];
+
+          const placeholders = rowParams
+            .map(() => `$${paramIndex++}`)
+            .join(', ');
+          valuesClauses.push(`(${placeholders})`);
+          params.push(...rowParams);
+        }
+
+        const sql = `
+          INSERT INTO inbound (
+            wsn,
+            inbound_date,
+            vehicle_no,
+            product_serial_number,
+            rack_no,
+            unload_remarks,
+            warehouse_id,
+            warehouse_name,
+            batch_id,
+            created_by,
+            created_user_name
+          ) VALUES ${valuesClauses.join(', ')}
+        `;
+
+        const result = await query(sql, params);
+        successCount += result.rowCount || 0;
+      } catch (chunkError: any) {
+        console.error('❌ Chunk error:', chunkError.message);
+      }
+    }
+
+    console.log(
+      `🎉 Batch ${batchId}: ${successCount} success, ${duplicateCount} duplicates, ${crossWarehouseCount} cross-warehouse, ${errorCount} errors`
+    );
+  } catch (error: any) {
+    console.error('❌ Process bulk error:', error);
+  } finally {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) { }
+  }
+}
+
+
+
+// MULTI-ENTRY - inbound fields only
+export const multiInboundEntry = async (req: Request, res: Response) => {
+  try {
+    const { entries, warehouse_id } = req.body;
+    const userId = (req as any).user?.id;
+    const userName = (req as any).user?.full_name ||
+      (req as any).user?.name ||
+      (req as any).user?.username ||
+      'Unknown';
+
+
+    if (!entries || entries.length === 0) {
+      return res.status(400).json({ error: 'No entries provided' });
+    }
+
+    // Get warehouse name
+    const whSql = `SELECT name FROM warehouses WHERE id = $1`;
+    const whResult = await query(whSql, [warehouse_id]);
+    const warehouseName = whResult.rows[0]?.name || '';
+
+    const wsns = entries
+      .map((e: any) => e.wsn)
+      .filter(Boolean)
+      .map((v: any) => String(v).trim());
+
+    // Existing WSN check
+    const existingMap = new Map<string, number>();
+    if (wsns.length > 0) {
+      const checkSql = `SELECT wsn, warehouse_id FROM inbound WHERE wsn = ANY($1)`;
+      const checkRes = await query(checkSql, [wsns]);
+
+      checkRes.rows.forEach((row: any) => {
+        existingMap.set(row.wsn, row.warehouse_id);
+      });
+    }
+
+    const batchId = generateBatchId('MULTI');
+
+    let successCount = 0;
+    const results: any[] = [];
+
+    for (const entry of entries) {
+      const wsn = entry.wsn?.trim();
+      if (!wsn) {
+        results.push({
+          wsn: 'EMPTY',
+          status: 'ERROR',
+          message: 'WSN required',
+        });
+        continue;
+      }
+
+      // Duplicate check
+      if (existingMap.has(wsn)) {
+        const existingWarehouseId = existingMap.get(wsn);
+        if (existingWarehouseId !== Number(warehouse_id)) {
+          results.push({
+            wsn,
+            status: 'DUPLICATE',
+            message: `Already inbound in warehouse ${existingWarehouseId}`,
+          });
+        } else {
+          results.push({
+            wsn,
+            status: 'DUPLICATE',
+            message: 'WSN already inbound in this warehouse',
+          });
+        }
+        continue;
+      }
+
+      const inboundDateRaw =
+        entry.inbound_date || new Date().toISOString().slice(0, 10);
+
+      const sql = `
+        INSERT INTO inbound (
+          wsn,
+          inbound_date,
+          vehicle_no,
+          product_serial_number,
+          rack_no,
+          unload_remarks,
+          warehouse_id,
+          warehouse_name,
+          batch_id,
+          created_by,
+          created_user_name
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+        )
+      `;
+
+      try {
+        await query(sql, [
+          wsn,
+          inboundDateRaw,
+          entry.vehicle_no || null,
+          entry.product_serial_number || null,
+          entry.rack_no || null,
+          entry.unload_remarks || null,
+          warehouse_id,
+          warehouseName,
+          batchId,
+          userId,
+          userName,
+        ]);
+
+        results.push({ wsn, status: 'SUCCESS', message: 'Created' });
+        successCount++;
+      } catch (err: any) {
+        results.push({
+          wsn,
+          status: 'ERROR',
+          message: err.message,
+        });
+      }
+    }
+
+    res.json({
+      batchId,
+      totalCount: entries.length,
+      successCount,
+      results,
+    });
+  } catch (error: any) {
+    console.error('❌ Multi Entry ERROR:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+// GET INBOUND LIST - with master_data LEFT JOIN
+export const getInboundList = async (req: Request, res: Response) => {
+  try {
+    const {
+      page = 1,
+      limit = 100,
+      search = '',
+      warehouseId,
+      dateFrom,
+      dateTo,
+      category,
+      brand,
+      batchId,
+    } = req.query;
+
+    const offset = (Number(page) - 1) * Number(limit);
+
+    let whereConditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    // Warehouse filter
+    if (warehouseId) {
+      whereConditions.push(`i.warehouse_id = $${paramIndex}`);
+      params.push(warehouseId);
+      paramIndex++;
+    }
+
+    // Search filter (WSN or product title)
+    if (search && search !== '') {
+      whereConditions.push(
+        `(i.wsn ILIKE $${paramIndex} OR m.product_title ILIKE $${paramIndex})`
+      );
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    // Date range filter
+    if (dateFrom && dateTo) {
+      whereConditions.push(
+        `i.inbound_date >= $${paramIndex}::date AND i.inbound_date <= $${paramIndex + 1}::date`
+      );
+      params.push(dateFrom);
+      params.push(dateTo);
+      paramIndex += 2;
+    } else if (dateFrom) {
+      whereConditions.push(`i.inbound_date >= $${paramIndex}::date`);
+      params.push(dateFrom);
+      paramIndex++;
+    } else if (dateTo) {
+      whereConditions.push(`i.inbound_date <= $${paramIndex}::date`);
+      params.push(dateTo);
+      paramIndex++;
+    }
+
+
+    // Brand filter - from master_data
+    if (brand && brand !== '') {
+      whereConditions.push(`m.brand = $${paramIndex}`);
+      params.push(brand);
+      paramIndex++;
+    }
+
+    // Category filter - from master_data
+    if (category && category !== '') {
+      whereConditions.push(`m.cms_vertical = $${paramIndex}`);
+      params.push(category);
+      paramIndex++;
+    }
+
+    // Batch ID filter
+    if (batchId && batchId !== '') {
+      whereConditions.push(`i.batch_id = $${paramIndex}`);
+      params.push(batchId);
+      paramIndex++;
+    }
+
+    const whereClause =
+      whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+
+    // Get total count
+    const countSql = `
+      SELECT COUNT(*)
+      FROM inbound i
+      LEFT JOIN master_data m ON i.wsn = m.wsn
+      ${whereClause}
+    `;
+    const countResult = await query(countSql, params);
+    const total = parseInt(countResult.rows[0].count);
+
+    // Get paginated data with master_data join
+    const dataSql = `
+      SELECT 
+        i.id,
+        i.wsn,
+        i.inbound_date,
+        i.vehicle_no,
+        i.rack_no,
+        i.product_serial_number,
+        i.unload_remarks,
+        i.quantity,
+        i.batch_id,
+        i.warehouse_id,
+        i.warehouse_name,        
+        i.created_user_name,
+        -- Master data fields
+        m.wid,
+        m.fsn,
+        m.order_id,
+        m.product_title,
+        m.brand,
+        m.cms_vertical,
+        m.fsp,
+        m.mrp,
+        m.hsn_sac,
+        m.igst_rate,
+        m.invoice_date,
+        m.fkt_link,
+        m.p_type,
+        m.p_size,
+        m.vrp,
+        m.yield_value,
+        m.fkqc_remark,
+        m.fk_grade
+      FROM inbound i
+      LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+      ${whereClause}
+      ORDER BY i.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    params.push(Number(limit));
+    params.push(offset);
+
+    const result = await query(dataSql, params);
+
+    res.json({
+      data: result.rows,
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      totalPages: Math.ceil(total / Number(limit)),
+    });
+  } catch (error: any) {
+    console.error('❌ Get inbound list error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+// GET BATCHES
+export const getInboundBatches = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId } = req.query;
+
+    let sql = `
+      SELECT 
+        batch_id, 
+        COUNT(*) as count, 
+        MAX(created_at) as last_updated  -- ✅ This is already correct
+      FROM inbound
+      WHERE batch_id IS NOT NULL
+    `;
+
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (warehouseId) {
+      sql += ` AND warehouse_id = $${paramIndex}`;
+      params.push(warehouseId);
+      paramIndex++;
+    }
+
+    sql += `
+      GROUP BY batch_id
+      ORDER BY last_updated DESC
+    `;
+
+    const result = await query(sql, params);
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('❌ Get batches error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+// DELETE BATCH
+export const deleteInboundBatch = async (req: Request, res: Response) => {
+  try {
+    const { batchId } = req.params;
+    const result = await query(
+      'DELETE FROM inbound WHERE batch_id = $1',
+      [batchId]
+    );
+
+    res.json({
+      message: 'Batch deleted',
+      count: result.rowCount,
+    });
+  } catch (error: any) {
+    console.error('❌ Delete batch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+// GET WAREHOUSE RACKS
+export const getWarehouseRacks = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId } = req.params;
+
+    const sql = `
+      SELECT id, rack_name, rack_type, capacity, location
+      FROM racks
+      WHERE warehouse_id = $1 AND is_active = true
+      ORDER BY rack_name
+    `;
+
+    const result = await query(sql, [warehouseId]);
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('❌ Get racks error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ============================================
+// GET BRANDS - from master_data
+// ============================================
+export const getBrands = async (req: Request, res: Response) => {
+  try {
+    const { warehouse_id } = req.query;
+
+    let sql = `
+      SELECT DISTINCT m.brand 
+      FROM inbound i
+      LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+      WHERE m.brand IS NOT NULL AND m.brand != ''
+    `;
+
+    const params: any[] = [];
+
+    if (warehouse_id) {
+      sql += ` AND i.warehouse_id = $1`;
+      params.push(warehouse_id);
+    }
+
+    sql += ` ORDER BY m.brand`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.brand));
+  } catch (error: any) {
+    console.error('❌ Get brands error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ============================================
+// GET CATEGORIES - from master_data
+// ============================================
+export const getCategories = async (req: Request, res: Response) => {
+  try {
+    const { warehouse_id } = req.query;
+
+    let sql = `
+      SELECT DISTINCT m.cms_vertical 
+      FROM inbound i
+      LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+      WHERE m.cms_vertical IS NOT NULL AND m.cms_vertical != ''
+    `;
+
+    const params: any[] = [];
+
+    if (warehouse_id) {
+      sql += ` AND i.warehouse_id = $1`;
+      params.push(warehouse_id);
+    }
+
+    sql += ` ORDER BY m.cms_vertical`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.cms_vertical));
+  } catch (error: any) {
+    console.error('❌ Get categories error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ============================================
+// GET ALL INBOUND WSNS
+// ============================================
+export const getAllInboundWSNs = async (req: Request, res: Response) => {
+  try {
+    const sql = `SELECT DISTINCT wsn FROM inbound ORDER BY wsn ASC`;
+    const result = await query(sql);
+
+    const wsns = result.rows.map((r: any) => r.wsn);
+
+    res.json(wsns);
+  } catch (error: any) {
+    console.error('❌ Error fetching inbound WSNs:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
