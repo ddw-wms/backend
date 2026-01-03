@@ -45,7 +45,8 @@ app.use(cors({
     'https://wms-ddw.vercel.app',
     'http://192.168.1.17:3000',
     'http://192.168.29.166:3000',
-    'https://ddwms.vercel.app'
+    'https://ddwms.vercel.app',
+    'http://127.0.0.1:9100'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
