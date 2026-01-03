@@ -28,9 +28,9 @@ export const initializeDatabase = async (): Promise<Pool> => {
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
 
-      max: 10,
-      idleTimeoutMillis: 0,
-      connectionTimeoutMillis: 7000,
+      max: 1,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
 
       statement_timeout: 0,
       query_timeout: 0,
