@@ -1093,3 +1093,33 @@ export const getCategories = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+// ============================================
+// GET SOURCES - from outbound table
+// ============================================
+export const getSources = async (req: Request, res: Response) => {
+  try {
+    const { warehouse_id } = req.query;
+
+    let sql = `
+      SELECT DISTINCT o.source
+      FROM outbound o
+      WHERE o.source IS NOT NULL AND o.source != ''
+    `;
+
+    const params: any[] = [];
+
+    if (warehouse_id) {
+      sql += ` AND o.warehouse_id = $1`;
+      params.push(warehouse_id);
+    }
+
+    sql += ` ORDER BY o.source`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.source));
+  } catch (error: any) {
+    console.error('❌ Get sources error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

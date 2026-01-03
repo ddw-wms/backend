@@ -16,7 +16,8 @@ import {
   deleteBatch,
   exportToExcel,
   getBrands,
-  getCategories
+  getCategories,
+  getSources
 } from '../controllers/outbound.controller';
 
 const router = Router();
@@ -36,6 +37,7 @@ router.get('/batches', hasRole('admin', 'manager', 'operator'), getBatches);
 router.get('/export', hasRole('admin', 'manager'), exportToExcel);
 router.get('/brands', hasRole('admin', 'manager', 'operator'), getBrands);
 router.get('/categories', hasRole('admin', 'manager', 'operator'), getCategories);
+router.get('/sources', hasRole('admin', 'manager', 'operator'), getSources);
 
 // POST routes - admin, operator
 router.post('/single', hasRole('admin', 'operator'), createSingleEntry);
