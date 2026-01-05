@@ -28,7 +28,7 @@ export const initializeDatabase = async (): Promise<Pool> => {
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
 
-      max: 3,
+      max: 3,   //if  query very slow (seconds/minutes) then we can increase max: 4 or 5
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 7000,
 
