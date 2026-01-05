@@ -41,9 +41,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://divinewms.vercel.app',
-    'https://wms-ddw.vercel.app',
-    'http://192.168.1.17:3000',
+    'http://192.168.1.8:3000',
     'http://192.168.29.166:3000',
     'https://ddwms.vercel.app',
     'http://127.0.0.1:9100'
