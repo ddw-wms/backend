@@ -602,3 +602,305 @@ export const exportReportToExcel = async (req: Request, res: Response) => {
         res.status(500).json({ error: error.message });
     }
 };
+
+// =================== ANALYTICS ENDPOINTS ===================
+
+// Get trend analysis (last 30 days)
+export const getTrendAnalysis = async (req: Request, res: Response) => {
+    try {
+        const { warehouse_id } = req.query;
+
+        console.log('📊 getTrendAnalysis called with warehouse_id:', warehouse_id);
+
+        if (!warehouse_id) {
+            return res.status(400).json({ error: 'Warehouse ID required' });
+        }
+
+        // Simplified query - just get last 30 days with direct aggregation
+        const trendSql = `
+            WITH dates AS (
+                SELECT generate_series(
+                    CURRENT_DATE - INTERVAL '29 days',
+                    CURRENT_DATE,
+                    '1 day'
+                )::date AS date
+            )
+            SELECT 
+                d.date,
+                COALESCE(COUNT(DISTINCT i.id), 0)::integer as inbound,
+                COALESCE(COUNT(DISTINCT q.id), 0)::integer as qc,
+                COALESCE(COUNT(DISTINCT p.id), 0)::integer as picking,
+                COALESCE(COUNT(DISTINCT o.id), 0)::integer as outbound
+            FROM dates d
+            LEFT JOIN inbound i ON DATE(i.inbound_date) = d.date AND i.warehouse_id = $1
+            LEFT JOIN qc q ON DATE(q.qc_date) = d.date AND q.warehouse_id = $1
+            LEFT JOIN picking p ON DATE(p.picking_date) = d.date AND p.warehouse_id = $1
+            LEFT JOIN outbound o ON DATE(o.dispatch_date) = d.date AND o.warehouse_id = $1
+            GROUP BY d.date
+            ORDER BY d.date ASC
+        `;
+
+        console.log('📊 Executing trend analysis query...');
+        const result = await query(trendSql, [warehouse_id]);
+        console.log('✅ Trend analysis query successful, rows:', result.rows.length);
+
+        res.json({
+            trends: result.rows
+        });
+    } catch (error: any) {
+        console.error('❌ Trend analysis error:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ error: error.message || 'Failed to fetch trend analysis' });
+    }
+};
+
+// Get QC pass/fail analysis
+export const getQCAnalysis = async (req: Request, res: Response) => {
+    try {
+        const { warehouse_id } = req.query;
+
+        console.log('✅ getQCAnalysis called with warehouse_id:', warehouse_id);
+
+        if (!warehouse_id) {
+            return res.status(400).json({ error: 'Warehouse ID required' });
+        }
+
+        const qcSql = `
+            SELECT 
+                COALESCE(qc_status, 'Unknown') as qc_status,
+                COALESCE(qc_grade, 'N/A') as qc_grade,
+                COUNT(*)::integer as count
+            FROM qc
+            WHERE warehouse_id = $1
+            GROUP BY qc_status, qc_grade
+            ORDER BY qc_status, qc_grade
+        `;
+
+        console.log('✅ Executing QC analysis query...');
+        const result = await query(qcSql, [warehouse_id]);
+        console.log('✅ QC analysis query successful, rows:', result.rows.length);
+
+        res.json({
+            qcAnalysis: result.rows
+        });
+    } catch (error: any) {
+        console.error('❌ QC analysis error:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ error: error.message || 'Failed to fetch QC analysis' });
+    }
+};
+
+// Get performance metrics
+export const getPerformanceMetrics = async (req: Request, res: Response) => {
+    try {
+        const { warehouse_id } = req.query;
+
+        console.log('📈 getPerformanceMetrics called with warehouse_id:', warehouse_id);
+
+        if (!warehouse_id) {
+            return res.status(400).json({ error: 'Warehouse ID required' });
+        }
+
+        // Get user performance data separately and merge in code
+        const inboundUsersSql = `
+            SELECT 
+                COALESCE(created_user_name, 'Unknown') as user_name,
+                COUNT(*)::integer as count
+            FROM inbound
+            WHERE warehouse_id = $1 AND created_user_name IS NOT NULL
+            GROUP BY created_user_name
+        `;
+
+        const qcUsersSql = `
+            SELECT 
+                COALESCE(qc_by_name, 'Unknown') as user_name,
+                COUNT(*)::integer as count
+            FROM qc
+            WHERE warehouse_id = $1 AND qc_by_name IS NOT NULL
+            GROUP BY qc_by_name
+        `;
+
+        const pickingUsersSql = `
+            SELECT 
+                COALESCE(picker_name, 'Unknown') as user_name,
+                COUNT(*)::integer as count
+            FROM picking
+            WHERE warehouse_id = $1 AND picker_name IS NOT NULL
+            GROUP BY picker_name
+        `;
+
+        // Brand performance - simplified without complex joins
+        const brandPerfSql = `
+            SELECT 
+                COALESCE(brand, 'Unknown') as brand,
+                COUNT(*)::integer as total_items,
+                0::integer as dispatched_items,
+                0.00 as dispatch_rate,
+                0.00 as avg_days
+            FROM master_data
+            WHERE brand IS NOT NULL AND brand != ''
+            GROUP BY brand
+            ORDER BY total_items DESC
+            LIMIT 20
+        `;
+
+        console.log('📈 Executing performance queries...');
+        const [inboundUsers, qcUsers, pickingUsers, brandPerf] = await Promise.all([
+            query(inboundUsersSql, [warehouse_id]),
+            query(qcUsersSql, [warehouse_id]),
+            query(pickingUsersSql, [warehouse_id]),
+            query(brandPerfSql, [])
+        ]);
+
+        // Merge user data in JavaScript
+        const userMap = new Map();
+
+        inboundUsers.rows.forEach((row: any) => {
+            if (!userMap.has(row.user_name)) {
+                userMap.set(row.user_name, { user_name: row.user_name, inbound: 0, qc: 0, picking: 0, total: 0 });
+            }
+            userMap.get(row.user_name).inbound = parseInt(row.count);
+            userMap.get(row.user_name).total += parseInt(row.count);
+        });
+
+        qcUsers.rows.forEach((row: any) => {
+            if (!userMap.has(row.user_name)) {
+                userMap.set(row.user_name, { user_name: row.user_name, inbound: 0, qc: 0, picking: 0, total: 0 });
+            }
+            userMap.get(row.user_name).qc = parseInt(row.count);
+            userMap.get(row.user_name).total += parseInt(row.count);
+        });
+
+        pickingUsers.rows.forEach((row: any) => {
+            if (!userMap.has(row.user_name)) {
+                userMap.set(row.user_name, { user_name: row.user_name, inbound: 0, qc: 0, picking: 0, total: 0 });
+            }
+            userMap.get(row.user_name).picking = parseInt(row.count);
+            userMap.get(row.user_name).total += parseInt(row.count);
+        });
+
+        const userPerformance = Array.from(userMap.values())
+            .sort((a, b) => b.total - a.total)
+            .slice(0, 20);
+
+        console.log('✅ Performance queries successful');
+        console.log('User performance rows:', userPerformance.length);
+        console.log('Brand performance rows:', brandPerf.rows.length);
+
+        res.json({
+            userPerformance,
+            brandPerformance: brandPerf.rows
+        });
+    } catch (error: any) {
+        console.error('❌ Performance metrics error:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ error: error.message || 'Failed to fetch performance metrics' });
+    }
+};
+
+// Get exception reports (stuck items, aging inventory, etc.)
+export const getExceptionReports = async (req: Request, res: Response) => {
+    try {
+        const { warehouse_id } = req.query;
+
+        console.log('⚠️ getExceptionReports called with warehouse_id:', warehouse_id);
+
+        if (!warehouse_id) {
+            return res.status(400).json({ error: 'Warehouse ID required' });
+        }
+
+        let stuckInbound = [];
+        let qcFailed = [];
+        let slowMoving = [];
+
+        try {
+            // Stuck in Inbound - simplest possible query
+            console.log('⚠️ Query 1: Getting stuck inbound items...');
+            const stuckResult = await query(`
+                SELECT 
+                    i.wsn,
+                    COALESCE(m.product_title, 'Unknown') as product_title,
+                    COALESCE(m.brand, 'Unknown') as brand,
+                    i.inbound_date,
+                    7 as days_stuck
+                FROM inbound i
+                LEFT JOIN master_data m ON i.wsn = m.wsn
+                WHERE i.warehouse_id = $1
+                AND i.inbound_date < CURRENT_DATE - INTERVAL '7 days'
+                LIMIT 50
+            `, [warehouse_id]);
+            stuckInbound = stuckResult.rows || [];
+            console.log('✅ Stuck inbound query successful:', stuckInbound.length);
+        } catch (err: any) {
+            console.error('❌ Stuck inbound query failed:', err.message);
+        }
+
+        try {
+            // QC Failed items - check for any grade that indicates failure
+            console.log('⚠️ Query 2: Getting QC failed items...');
+            const qcResult = await query(`
+                SELECT 
+                    q.wsn,
+                    COALESCE(m.product_title, 'Unknown') as product_title,
+                    COALESCE(m.brand, 'Unknown') as brand,
+                    q.qc_date,
+                    q.qc_status,
+                    COALESCE(q.qc_grade, 'N/A') as qc_grade,
+                    COALESCE(q.qc_remarks, '') as qc_remarks
+                FROM qc q
+                LEFT JOIN master_data m ON q.wsn = m.wsn
+                WHERE q.warehouse_id = $1
+                AND (
+                    q.qc_status ILIKE '%fail%' 
+                    OR q.qc_grade IN ('D', 'F', 'Fail')
+                    OR q.qc_remarks ILIKE '%defect%'
+                    OR q.qc_remarks ILIKE '%damage%'
+                )
+                ORDER BY q.qc_date DESC
+                LIMIT 50
+            `, [warehouse_id]);
+            qcFailed = qcResult.rows || [];
+            console.log('✅ QC failed query successful:', qcFailed.length);
+
+            // Also log total QC count for debugging
+            const totalQC = await query(`SELECT COUNT(*) as total FROM qc WHERE warehouse_id = $1`, [warehouse_id]);
+            console.log('📊 Total QC records in warehouse:', totalQC.rows[0]?.total);
+        } catch (err: any) {
+            console.error('❌ QC failed query failed:', err.message);
+        }
+
+        try {
+            // Slow moving inventory
+            console.log('⚠️ Query 3: Getting slow moving items...');
+            const slowResult = await query(`
+                SELECT 
+                    i.wsn,
+                    COALESCE(m.product_title, 'Unknown') as product_title,
+                    COALESCE(m.brand, 'Unknown') as brand,
+                    i.inbound_date,
+                    30 as days_in_warehouse
+                FROM inbound i
+                LEFT JOIN master_data m ON i.wsn = m.wsn
+                WHERE i.warehouse_id = $1
+                AND i.inbound_date < CURRENT_DATE - INTERVAL '30 days'
+                LIMIT 50
+            `, [warehouse_id]);
+            slowMoving = slowResult.rows || [];
+            console.log('✅ Slow moving query successful:', slowMoving.length);
+        } catch (err: any) {
+            console.error('❌ Slow moving query failed:', err.message);
+        }
+
+        console.log('✅ Exception reports completed successfully');
+
+        res.json({
+            stuckInbound,
+            qcFailed,
+            slowMoving
+        });
+    } catch (error: any) {
+        console.error('❌ Exception reports error:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ error: error.message || 'Failed to fetch exception reports' });
+    }
+};
