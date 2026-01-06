@@ -174,23 +174,31 @@ export const getAllBackups = async (req: Request, res: Response) => {
 export const downloadBackup = async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
+        console.log('🔍 Download request for backup ID:', id);
 
         const result = await query(
             'SELECT file_name, file_path FROM backups WHERE id = $1',
             [id]
         );
 
+        console.log('📊 Query result:', result.rows.length, 'rows found');
+
         if (result.rows.length === 0) {
+            console.log('❌ Backup not found in database');
             return res.status(404).json({ error: 'Backup not found' });
         }
 
         const backup = result.rows[0];
         const filePath = backup.file_path;
+        console.log('📁 File path:', filePath);
+        console.log('📁 File exists:', fs.existsSync(filePath));
 
         if (!fs.existsSync(filePath)) {
+            console.log('❌ Backup file not found on disk');
             return res.status(404).json({ error: 'Backup file not found on disk' });
         }
 
+        console.log('✅ Sending file:', backup.file_name);
         res.download(filePath, backup.file_name);
 
     } catch (error: any) {

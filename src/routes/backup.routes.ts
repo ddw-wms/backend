@@ -22,25 +22,11 @@ router.get(
     backupController.getAllBackups
 );
 
-// Download backup file
+// Get database statistics
 router.get(
-    '/download/:id',
+    '/stats',
     hasRole('admin'),
-    backupController.downloadBackup
-);
-
-// Delete backup
-router.delete(
-    '/:id',
-    hasRole('admin'),
-    backupController.deleteBackup
-);
-
-// Restore database from backup (admin only)
-router.post(
-    '/restore/:id',
-    hasRole('admin'),
-    backupController.restoreBackup
+    backupController.getDatabaseStats
 );
 
 // Get restore logs
@@ -50,18 +36,32 @@ router.get(
     backupController.getRestoreLogs
 );
 
+// Download backup file
+router.get(
+    '/download/:id',
+    hasRole('admin'),
+    backupController.downloadBackup
+);
+
+// Restore database from backup (admin only)
+router.post(
+    '/restore/:id',
+    hasRole('admin'),
+    backupController.restoreBackup
+);
+
+// Delete backup
+router.delete(
+    '/:id',
+    hasRole('admin'),
+    backupController.deleteBackup
+);
+
 // Export as JSON
 router.post(
     '/export-json',
     hasRole('admin'),
     backupController.exportAsJSON
-);
-
-// Get database statistics
-router.get(
-    '/stats',
-    hasRole('admin'),
-    backupController.getDatabaseStats
 );
 
 export default router;
