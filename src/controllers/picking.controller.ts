@@ -178,13 +178,8 @@ export const multiPickingEntry = async (req: Request, res: Response) => {
     let successCount = 0;
     const errors: any[] = [];
 
-    console.log('📦 Picking multi-entry - Total entries:', entries.length);
-    console.log('📦 Warehouse ID:', warehouse_id);
-    console.log('📦 Batch ID:', batchId);
-
     for (const entry of entries) {
       try {
-        console.log('Processing WSN:', entry.wsn, 'Source:', entry.source);
 
         const sql = `
           INSERT INTO picking (
@@ -213,7 +208,6 @@ export const multiPickingEntry = async (req: Request, res: Response) => {
         ]);
 
         successCount++;
-        console.log('✅ Success:', entry.wsn);
       } catch (err: any) {
         console.error('❌ Error inserting WSN:', entry.wsn, err.message);
         errors.push({ wsn: entry.wsn, error: err.message });
@@ -336,16 +330,10 @@ export const getCustomers = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
 
-    console.log('===== GET CUSTOMERS REQUEST =====');
-    console.log('Warehouse ID:', warehouseId);
-
     if (!warehouseId) {
-      console.log('ERROR: Warehouse ID missing');
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
 
-    // STEP 1: Try customers table (like outbound does)
-    console.log('Step 1: Query customers table...');
     let sql = `
       SELECT DISTINCT customer_name
       FROM picking
@@ -354,27 +342,13 @@ export const getCustomers = async (req: Request, res: Response) => {
       LIMIT 100
     `;
 
-    console.log('SQL:', sql);
-    console.log('Params:', [warehouseId]);
-
     let result = await query(sql, [warehouseId]);
-
-    console.log('Result rows:', result.rows.length);
-    console.log('Data:', result.rows);
 
     // RETURN SIMPLE STRING ARRAY (SAME AS OUTBOUND)
     const customerNames = result.rows.map((r: any) => r.customer_name);
 
-    console.log('Final customer names:', customerNames);
-    console.log('===== SUCCESS =====');
-
     res.json(customerNames);
   } catch (error: any) {
-    console.error('===== ERROR IN GET CUSTOMERS =====');
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    console.error('Full error:', error);
-
     res.status(500).json({
       error: error.message,
       details: error.stack
