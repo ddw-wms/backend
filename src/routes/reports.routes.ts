@@ -57,4 +57,25 @@ router.get('/export',
     reportsController.exportReportToExcel
 );
 
+// Analytics Endpoints
+router.get('/trend-analysis',
+    hasRole('admin', 'manager'),
+    reportsController.getTrendAnalysis
+);
+
+router.get('/qc-analysis',
+    hasRole('admin', 'manager', 'qc'),
+    reportsController.getQCAnalysis
+);
+
+router.get('/performance-metrics',
+    hasRole('admin', 'manager'),
+    reportsController.getPerformanceMetrics
+);
+
+router.get('/exception-reports',
+    hasRole('admin', 'manager'),
+    reportsController.getExceptionReports
+);
+
 export default router;
