@@ -6,6 +6,8 @@ import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { createJSONBackup, exportTableAsCSV, getDatabaseStatistics } from '../utils/supabaseBackup';
+import { backupScheduler } from '../services/backupScheduler';
+import { uploadToR2, deleteFromR2, isR2Configured } from '../services/cloudflareR2';
 
 const execPromise = promisify(exec);
 
@@ -29,6 +31,11 @@ export const createBackup = async (req: Request, res: Response) => {
             const backupResult = await createJSONBackup({
                 includeUsers: backup_type === 'full'
             });
+
+            // Upload to Cloudflare R2 (if configured)
+            if (isR2Configured()) {
+                await uploadToR2(backupResult.filePath, backupResult.fileName);
+            }
 
             // Save backup metadata to database
             const result = await query(
@@ -205,7 +212,7 @@ export const deleteBackup = async (req: Request, res: Response) => {
         const { id } = req.params;
 
         const result = await query(
-            'SELECT file_path FROM backups WHERE id = $1',
+            'SELECT file_path, file_name FROM backups WHERE id = $1',
             [id]
         );
 
@@ -213,9 +220,16 @@ export const deleteBackup = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Backup not found' });
         }
 
-        const filePath = result.rows[0].file_path;
+        const backup = result.rows[0];
+        const filePath = backup.file_path;
+        const fileName = backup.file_name;
 
-        // Delete file from disk
+        // Delete from Cloudflare R2 (if configured)
+        if (isR2Configured()) {
+            await deleteFromR2(fileName);
+        }
+
+        // Delete file from local disk
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
@@ -478,3 +492,287 @@ export const getDatabaseStats = async (req: Request, res: Response) => {
         res.status(500).json({ error: error.message });
     }
 };
+
+// ================= BACKUP SCHEDULES MANAGEMENT =================
+
+// Get all backup schedules
+export const getAllSchedules = async (req: Request, res: Response) => {
+    try {
+        const result = await query(
+            `SELECT 
+                id, name, frequency, backup_type, description, enabled,
+                time_of_day, day_of_week, day_of_month, retention_days,
+                last_run_at, next_run_at, created_at, updated_at
+            FROM backup_schedules 
+            ORDER BY enabled DESC, id DESC`
+        );
+
+        res.json(result.rows);
+    } catch (error: any) {
+        console.error('❌ Get schedules error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Create new backup schedule
+export const createSchedule = async (req: Request, res: Response) => {
+    try {
+        const {
+            name,
+            frequency,
+            backup_type = 'full',
+            description,
+            enabled = true,
+            time_of_day = '02:00:00',
+            day_of_week = 0,
+            day_of_month = 1,
+            retention_days = 30
+        } = req.body;
+        const user = (req as any).user;
+
+        if (!name || !frequency) {
+            return res.status(400).json({ error: 'Name and frequency are required' });
+        }
+
+        const result = await query(
+            `INSERT INTO backup_schedules (
+                name, frequency, backup_type, description, enabled,
+                time_of_day, day_of_week, day_of_month, retention_days, created_by
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING *`,
+            [name, frequency, backup_type, description, enabled,
+                time_of_day, day_of_week, day_of_month, retention_days, user?.id || null]
+        );
+
+        const schedule = result.rows[0];
+
+        // Schedule the backup if enabled
+        if (enabled) {
+            await backupScheduler.reloadSchedule(schedule.id);
+        }
+
+        res.json({
+            success: true,
+            message: 'Backup schedule created successfully',
+            schedule
+        });
+    } catch (error: any) {
+        console.error('❌ Create schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Update backup schedule
+export const updateSchedule = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const {
+            name,
+            frequency,
+            backup_type,
+            description,
+            enabled,
+            time_of_day,
+            day_of_week,
+            day_of_month,
+            retention_days
+        } = req.body;
+
+        const result = await query(
+            `UPDATE backup_schedules SET
+                name = COALESCE($1, name),
+                frequency = COALESCE($2, frequency),
+                backup_type = COALESCE($3, backup_type),
+                description = COALESCE($4, description),
+                enabled = COALESCE($5, enabled),
+                time_of_day = COALESCE($6, time_of_day),
+                day_of_week = COALESCE($7, day_of_week),
+                day_of_month = COALESCE($8, day_of_month),
+                retention_days = COALESCE($9, retention_days),
+                updated_at = NOW()
+            WHERE id = $10
+            RETURNING *`,
+            [name, frequency, backup_type, description, enabled,
+                time_of_day, day_of_week, day_of_month, retention_days, id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Schedule not found' });
+        }
+
+        // Reload the schedule
+        await backupScheduler.reloadSchedule(parseInt(id));
+
+        res.json({
+            success: true,
+            message: 'Schedule updated successfully',
+            schedule: result.rows[0]
+        });
+    } catch (error: any) {
+        console.error('❌ Update schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Delete backup schedule
+export const deleteSchedule = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+
+        // Cancel the scheduled job
+        backupScheduler.cancelSchedule(parseInt(id));
+
+        // Delete from database
+        const result = await query(
+            'DELETE FROM backup_schedules WHERE id = $1 RETURNING id',
+            [id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Schedule not found' });
+        }
+
+        res.json({
+            success: true,
+            message: 'Schedule deleted successfully'
+        });
+    } catch (error: any) {
+        console.error('❌ Delete schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Toggle schedule enabled/disabled
+export const toggleSchedule = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+        const { enabled } = req.body;
+
+        const result = await query(
+            `UPDATE backup_schedules SET enabled = $1, updated_at = NOW() 
+             WHERE id = $2 RETURNING *`,
+            [enabled, id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Schedule not found' });
+        }
+
+        // Reload the schedule
+        await backupScheduler.reloadSchedule(parseInt(id));
+
+        res.json({
+            success: true,
+            message: `Schedule ${enabled ? 'enabled' : 'disabled'} successfully`,
+            schedule: result.rows[0]
+        });
+    } catch (error: any) {
+        console.error('❌ Toggle schedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Get backup health statistics
+export const getHealthStats = async (req: Request, res: Response) => {
+    try {
+        // Update stats first
+        await query('SELECT update_backup_health_stats()');
+
+        // Get stats
+        const result = await query('SELECT * FROM backup_health_stats WHERE id = 1');
+
+        if (result.rows.length === 0) {
+            return res.json({
+                total_backups: 0,
+                successful_backups: 0,
+                failed_backups: 0,
+                last_backup_at: null,
+                last_backup_status: null,
+                last_backup_size: 0,
+                total_storage_used: 0,
+                average_backup_size: 0,
+                success_rate: 0
+            });
+        }
+
+        const stats = result.rows[0];
+
+        // Add formatted sizes
+        const formatBytes = (bytes: number) => {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+        };
+
+        res.json({
+            ...stats,
+            total_storage_used_formatted: formatBytes(stats.total_storage_used || 0),
+            average_backup_size_formatted: formatBytes(stats.average_backup_size || 0),
+            last_backup_size_formatted: formatBytes(stats.last_backup_size || 0)
+        });
+    } catch (error: any) {
+        console.error('❌ Get health stats error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Get scheduler status
+export const getSchedulerStatus = async (req: Request, res: Response) => {
+    try {
+        const status = backupScheduler.getStatus();
+        res.json(status);
+    } catch (error: any) {
+        console.error('❌ Get scheduler status error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Manual trigger of scheduled backup
+export const triggerScheduledBackup = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+
+        const result = await query(
+            'SELECT * FROM backup_schedules WHERE id = $1',
+            [id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Schedule not found' });
+        }
+
+        const schedule = result.rows[0];
+
+        // Create backup immediately
+        const backupResult = await createJSONBackup({
+            includeUsers: schedule.backup_type === 'full'
+        });
+
+        // Save backup metadata
+        await query(
+            `INSERT INTO backups (
+                file_name, file_path, file_size, backup_type, description, created_by
+            ) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                backupResult.fileName,
+                backupResult.filePath,
+                backupResult.fileSize,
+                'json',
+                `${schedule.description || 'Manual trigger'} (${schedule.name})`,
+                (req as any).user?.id || null
+            ]
+        );
+
+        res.json({
+            success: true,
+            message: 'Backup triggered successfully',
+            backup: backupResult
+        });
+    } catch (error: any) {
+        console.error('❌ Trigger scheduled backup error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
