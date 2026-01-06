@@ -30,6 +30,7 @@ import reportsRoutes from './routes/reports.routes';
 import backupRoutes from './routes/backup.routes';
 import { isDbReady } from "./config/database";
 import { apiTimeout } from './middleware/timeout.middleware';
+import { backupScheduler } from './services/backupScheduler';
 
 
 
@@ -71,32 +72,57 @@ app.use(express.urlencoded({ limit: '1000mb', extended: true }));
 app.use(express.json({ limit: '1000mb' }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// Serve Print Agent installer
-app.get('/downloads/print-agent', (req: Request, res: Response) => {
-  const installerPath = path.join(__dirname, '../installers/WMS-Print-Agent-Setup.exe');
+// Serve Print Agent installer (from Cloudflare R2)
+app.get('/downloads/print-agent', async (req: Request, res: Response) => {
+  try {
+    const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
-  // Check if file exists
-  const fs = require('fs');
-  if (!fs.existsSync(installerPath)) {
-    return res.status(404).json({
-      error: 'Print Agent installer not found',
-      message: 'Please contact IT support to get the installer file'
-    });
-  }
-
-  // Set headers for download
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', 'attachment; filename="WMS-Print-Agent-Setup.exe"');
-
-  // Send file
-  res.sendFile(installerPath, (err) => {
-    if (err) {
-      console.error('Download error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Download failed' });
+    // Check if R2 is configured
+    if (!process.env.CLOUDFLARE_R2_ACCOUNT_ID || !process.env.CLOUDFLARE_R2_ACCESS_KEY) {
+      // Fallback to local file
+      const installerPath = path.join(__dirname, '../installers/WMS-Print-Agent-Setup.exe');
+      if (fs.existsSync(installerPath)) {
+        return res.download(installerPath, 'WMS-Print-Agent-Setup.exe');
       }
+      return res.status(404).json({ error: 'Print Agent installer not found' });
     }
-  });
+
+    // Download from Cloudflare R2
+    const r2Client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY,
+        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_KEY,
+      },
+    });
+
+    const bucketName = process.env.CLOUDFLARE_R2_BUCKET || 'wms-backups';
+    const fileName = 'WMS Print Agent Setup 1.0.0.exe';
+
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: fileName,
+    });
+
+    const response = await r2Client.send(command);
+
+    if (response.Body) {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.setHeader('Content-Length', response.ContentLength || 0);
+
+      // Stream the file
+      const stream = response.Body as any;
+      stream.pipe(res);
+    } else {
+      res.status(404).json({ error: 'File not found in cloud storage' });
+    }
+
+  } catch (error: any) {
+    console.error('Print Agent download error:', error);
+    res.status(500).json({ error: 'Download failed', details: error.message });
+  }
 });
 
 // API Routes
@@ -139,6 +165,10 @@ if (process.env.NODE_ENV !== 'test') {
   (async () => {
     try {
       await initializeDatabase();
+
+      // Initialize backup scheduler
+      await backupScheduler.initialize();
+
       app.listen(PORT, () => {
         console.log(`✓ Server running on port ${PORT}`);
       });

@@ -64,4 +64,62 @@ router.post(
     backupController.exportAsJSON
 );
 
+// ========== NEW SCHEDULED BACKUP ROUTES ==========
+
+// Get backup health statistics
+router.get(
+    '/health/stats',
+    hasRole('admin'),
+    backupController.getHealthStats
+);
+
+// Get scheduler status
+router.get(
+    '/scheduler/status',
+    hasRole('admin'),
+    backupController.getSchedulerStatus
+);
+
+// Get all schedules
+router.get(
+    '/schedules',
+    hasRole('admin'),
+    backupController.getAllSchedules
+);
+
+// Create new schedule
+router.post(
+    '/schedules',
+    hasRole('admin'),
+    backupController.createSchedule
+);
+
+// Update schedule
+router.put(
+    '/schedules/:id',
+    hasRole('admin'),
+    backupController.updateSchedule
+);
+
+// Delete schedule
+router.delete(
+    '/schedules/:id',
+    hasRole('admin'),
+    backupController.deleteSchedule
+);
+
+// Toggle schedule enabled/disabled
+router.patch(
+    '/schedules/:id/toggle',
+    hasRole('admin'),
+    backupController.toggleSchedule
+);
+
+// Manually trigger a scheduled backup
+router.post(
+    '/schedules/:id/trigger',
+    hasRole('admin'),
+    backupController.triggerScheduledBackup
+);
+
 export default router;
