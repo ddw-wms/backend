@@ -1,6 +1,6 @@
 // File Path = warehouse-backend/src/routes/reports.routes.ts
 import express, { Router } from 'express';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import * as reportsController from '../controllers/reports.controller';
 
 const router: Router = express.Router();
@@ -10,71 +10,71 @@ router.use(authMiddleware);
 
 // Inventory Reports
 router.get('/current-stock',
-    hasRole('admin', 'manager', 'operator'),
+    hasPermission('view_reports'),
     reportsController.getCurrentStockReport
 );
 
 router.get('/stock-movement',
-    hasRole('admin', 'manager'),
+    hasPermission('view_reports'),
     reportsController.getStockMovementReport
 );
 
 // Module-wise Reports
 router.get('/inbound',
-    hasRole('admin', 'manager', 'operator'),
+    hasPermission('view_reports'),
     reportsController.getInboundReport
 );
 
 router.get('/outbound',
-    hasRole('admin', 'manager', 'operator'),
+    hasPermission('view_reports'),
     reportsController.getOutboundReport
 );
 
 router.get('/qc',
-    hasRole('admin', 'manager', 'qc'),
+    hasPermission('view_reports'),
     reportsController.getQCReport
 );
 
 router.get('/picking',
-    hasRole('admin', 'manager', 'picker'),
+    hasPermission('view_reports'),
     reportsController.getPickingReport
 );
 
 // Performance Reports
 router.get('/user-performance',
-    hasRole('admin', 'manager'),
+    hasPermission('view_reports'),
     reportsController.getUserPerformanceReport
 );
 
 router.get('/warehouse-summary',
-    hasRole('admin', 'manager'),
+    hasPermission('view_reports'),
     reportsController.getWarehouseSummary
 );
 
 // Export Reports
 router.get('/export',
-    hasRole('admin', 'manager'),
+    hasPermission('export_reports'),
     reportsController.exportReportToExcel
 );
 
 // Analytics Endpoints
 router.get('/trend-analysis',
-    hasRole('admin', 'manager'),
+    hasPermission('view_reports'),
     reportsController.getTrendAnalysis
 );
 
 router.get('/qc-analysis',
-    hasRole('admin', 'manager', 'qc'),
+    hasPermission('view_reports'),
     reportsController.getQCAnalysis
 );
 
 router.get('/performance-metrics',
-    hasRole('admin', 'manager'),
+    hasPermission('view_reports'),
     reportsController.getPerformanceMetrics
 );
 
 router.get('/exception-reports',
-    hasRole('admin', 'manager'),
+    hasPermission('view_reports'),
     reportsController.getExceptionReports
 );
 

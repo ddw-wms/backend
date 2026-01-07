@@ -17,7 +17,7 @@ import {
   getAllQCWSNs,
 } from '../controllers/qc.controller';
 
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import { upload } from '../middleware/upload.middleware';
 
 const router = Router();
@@ -25,30 +25,30 @@ const router = Router();
 // Base authentication for all routes
 router.use(authMiddleware);
 
-// Pending items - admin, manager, qc can view
-router.get('/pending-inbound', hasRole('admin', 'manager', 'qc'), getPendingInboundForQC);
+// Pending items - permission-based access
+router.get('/pending-inbound', hasPermission('view_qc'), getPendingInboundForQC);
 
-// Get all QC'd WSNs (for duplicate checking) - admin, manager, qc
-router.get('/wsns/all', hasRole('admin', 'manager', 'qc'), getAllQCWSNs);
+// Get all QC'd WSNs (for duplicate checking)
+router.get('/wsns/all', hasPermission('view_qc'), getAllQCWSNs);
 
 // QC List & Operations
-router.get('/list', hasRole('admin', 'manager', 'qc'), getQCList);
-router.post('/create', hasRole('admin', 'qc'), createQCEntry); // Only admin and qc can create
-router.delete('/delete/:qcId', hasRole('admin'), deleteQCEntry); // Only admin can delete
+router.get('/list', hasPermission('view_qc'), getQCList);
+router.post('/create', hasPermission('create_qc_single'), createQCEntry);
+router.delete('/delete/:qcId', hasPermission('delete_qc'), deleteQCEntry);
 
-// Bulk & Multi - only admin and qc
-router.post('/bulk-upload', hasRole('admin', 'qc'), upload.single('file'), bulkQCUpload);
-router.post('/multi-entry', hasRole('admin', 'qc'), multiQCEntry);
-router.get('/template', hasRole('admin', 'manager', 'qc'), getQCTemplate);
+// Bulk & Multi
+router.post('/bulk-upload', hasPermission('upload_qc_bulk'), upload.single('file'), bulkQCUpload);
+router.post('/multi-entry', hasPermission('create_qc_multi'), multiQCEntry);
+router.get('/template', hasPermission('view_qc'), getQCTemplate);
 
-// Stats & Batches - admin, manager, qc can view
-router.get('/stats', hasRole('admin', 'manager', 'qc'), getQCStats);
-router.get('/batches', hasRole('admin', 'manager', 'qc'), getQCBatches);
-router.delete('/batch/:batchId', hasRole('admin'), deleteQCBatch); // Only admin can delete
+// Stats & Batches
+router.get('/stats', hasPermission('view_qc'), getQCStats);
+router.get('/batches', hasPermission('view_qc'), getQCBatches);
+router.delete('/batch/:batchId', hasPermission('delete_qc'), deleteQCBatch);
 
-// Filters - admin, manager, qc can view
-router.get('/brands', hasRole('admin', 'manager', 'qc'), getQCBrands);
-router.get('/categories', hasRole('admin', 'manager', 'qc'), getQCCategories);
+// Filters
+router.get('/brands', hasPermission('view_qc'), getQCBrands);
+router.get('/categories', hasPermission('view_qc'), getQCCategories);
 
 // Export
 router.get('/export', exportQCData);
