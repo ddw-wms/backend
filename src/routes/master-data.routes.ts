@@ -3,7 +3,7 @@ import express, { NextFunction, Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import * as ctrl from '../controllers/master-data.controller';
 
 const router = express.Router();
@@ -26,22 +26,22 @@ const upload = multer({
 // All routes require authentication
 router.use(authMiddleware);
 
-// Template download - admin, manager, operator
-router.get('/download-template', hasRole('admin', 'manager', 'operator'), ctrl.downloadTemplate);
+// Template download
+router.get('/download-template', hasPermission('view_master_data'), ctrl.downloadTemplate);
 
-// View routes - admin, manager, operator
-router.get('/', hasRole('admin', 'manager', 'operator'), ctrl.getMasterData);
-router.get('/batches', hasRole('admin', 'manager', 'operator'), ctrl.getBatches);
-router.get('/export', hasRole('admin', 'manager', 'operator'), ctrl.exportMasterData);
+// View routes
+router.get('/', hasPermission('view_master_data'), ctrl.getMasterData);
+router.get('/batches', hasPermission('view_master_data'), ctrl.getBatches);
+router.get('/export', hasPermission('export_master_data'), ctrl.exportMasterData);
 
-// Upload routes - admin, operator
-router.post('/upload', hasRole('admin', 'operator'), upload.single('file'), ctrl.uploadMasterData);
-router.get('/upload/progress/:jobId', hasRole('admin', 'manager', 'operator'), ctrl.getUploadProgress);
-router.get('/upload/active', hasRole('admin', 'manager', 'operator'), ctrl.getActiveUploads);
-router.delete('/upload/cancel/:jobId', hasRole('admin', 'operator'), ctrl.cancelUpload);
+// Upload routes
+router.post('/upload', hasPermission('create_master_data'), upload.single('file'), ctrl.uploadMasterData);
+router.get('/upload/progress/:jobId', hasPermission('view_master_data'), ctrl.getUploadProgress);
+router.get('/upload/active', hasPermission('view_master_data'), ctrl.getActiveUploads);
+router.delete('/upload/cancel/:jobId', hasPermission('create_master_data'), ctrl.cancelUpload);
 
-// Delete routes - admin only
-router.delete('/:id', hasRole('admin'), ctrl.deleteMasterData);
-router.delete('/batch/:batchId', hasRole('admin'), ctrl.deleteBatch);
+// Delete routes
+router.delete('/:id', hasPermission('delete_master_data'), ctrl.deleteMasterData);
+router.delete('/batch/:batchId', hasPermission('delete_master_data'), ctrl.deleteBatch);
 
 export default router;

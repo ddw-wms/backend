@@ -1,6 +1,6 @@
 // File Path = warehouse-backend/src/routes/picking.routes.ts
 import { Router } from 'express';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import {
   getSourceByWSN,
   multiPickingEntry,
@@ -17,28 +17,28 @@ const router = Router();
 // All picking routes require authentication
 router.use(authMiddleware);
 
-// GET source data by WSN (QC → INBOUND → MASTER priority) - admin, manager, picker
-router.get('/source-by-wsn', hasRole('admin', 'manager', 'picker'), getSourceByWSN);
+// GET source data by WSN (QC → INBOUND → MASTER priority)
+router.get('/source-by-wsn', hasPermission('view_picking'), getSourceByWSN);
 
-// POST multi-entry with auto batch ID - only admin and picker
-router.post('/multi-entry', hasRole('admin', 'picker'), multiPickingEntry);
+// POST multi-entry with auto batch ID
+router.post('/multi-entry', hasPermission('create_picking_multi'), multiPickingEntry);
 
-// GET picking list with filters & pagination - admin, manager, picker
-router.get('/list', hasRole('admin', 'manager', 'picker'), getPickingList);
+// GET picking list with filters & pagination
+router.get('/list', hasPermission('view_picking'), getPickingList);
 
-// GET customers from customers table - admin, manager, picker
-router.get('/customers', hasRole('admin', 'manager', 'picker'), getCustomers);
+// GET customers from customers table
+router.get('/customers', hasPermission('view_picking'), getCustomers);
 
-// GET check if WSN exists - admin, manager, picker
-router.get('/check-wsn', hasRole('admin', 'manager', 'picker'), checkWSNExists);
+// GET check if WSN exists
+router.get('/check-wsn', hasPermission('view_picking'), checkWSNExists);
 
-// GET all existing WSNs - admin, manager, picker
-router.get('/existing-wsns', hasRole('admin', 'manager', 'picker'), getExistingWSNs);
+// GET all existing WSNs
+router.get('/existing-wsns', hasPermission('view_picking'), getExistingWSNs);
 
-// GET batches - admin, manager, picker
-router.get('/batches', hasRole('admin', 'manager', 'picker'), getBatches);
+// GET batches
+router.get('/batches', hasPermission('view_picking'), getBatches);
 
-// DELETE batch - only admin
-router.delete('/batch/:batchId', hasRole('admin'), deleteBatch);
+// DELETE batch
+router.delete('/batch/:batchId', hasPermission('delete_picking'), deleteBatch);
 
 export default router;

@@ -1,6 +1,6 @@
 // File Path = warehouse-backend/src/routes/customer.routes.ts
 import { Router } from 'express';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import {
   getCustomers,
   getCustomerById,
@@ -15,18 +15,18 @@ const router = Router();
 // All routes require authentication
 router.use(authMiddleware);
 
-// GET routes - admin, manager, operator can view
-router.get('/', hasRole('admin', 'manager', 'operator'), getCustomers);
-router.get('/names', hasRole('admin', 'manager', 'operator', 'picker'), getCustomerNames);
-router.get('/:id', hasRole('admin', 'manager', 'operator'), getCustomerById);
+// GET routes - permission-based access
+router.get('/', hasPermission('view_customers'), getCustomers);
+router.get('/names', hasPermission('view_customers'), getCustomerNames);
+router.get('/:id', hasPermission('view_customers'), getCustomerById);
 
-// POST routes - admin, operator can create
-router.post('/', hasRole('admin', 'operator'), createCustomer);
+// POST routes
+router.post('/', hasPermission('create_customer'), createCustomer);
 
-// PUT routes - admin, operator can update
-router.put('/:id', hasRole('admin', 'operator'), updateCustomer);
+// PUT routes
+router.put('/:id', hasPermission('edit_customer'), updateCustomer);
 
-// DELETE routes - admin only
-router.delete('/:id', hasRole('admin'), deleteCustomer);
+// DELETE routes
+router.delete('/:id', hasPermission('delete_customer'), deleteCustomer);
 
 export default router;

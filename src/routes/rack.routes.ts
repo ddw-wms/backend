@@ -2,7 +2,7 @@
 import express, { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import * as rackController from '../controllers/rack.controller';
 
 const router: Router = express.Router();
@@ -37,15 +37,15 @@ router.use(authMiddleware);
 router.get('/', rackController.getRacks);
 router.get('/by-warehouse', rackController.getRacksByWarehouse);
 
-// POST routes - admin only
-router.post('/', hasRole('admin'), rackController.createRack);
-router.post('/bulk-upload', hasRole('admin'), upload.single('file'), rackController.bulkUploadRacks);
+// POST routes - permission-based
+router.post('/', hasPermission('create_rack'), rackController.createRack);
+router.post('/bulk-upload', hasPermission('create_rack'), upload.single('file'), rackController.bulkUploadRacks);
 
-// PUT routes - admin only
-router.put('/:id', hasRole('admin'), rackController.updateRack);
-router.patch('/:id/toggle', hasRole('admin'), rackController.toggleRackStatus);
+// PUT routes - permission-based
+router.put('/:id', hasPermission('edit_rack'), rackController.updateRack);
+router.patch('/:id/toggle', hasPermission('edit_rack'), rackController.toggleRackStatus);
 
-// DELETE routes - admin only
-router.delete('/:id', hasRole('admin'), rackController.deleteRack);
+// DELETE routes - permission-based
+router.delete('/:id', hasPermission('delete_rack'), rackController.deleteRack);
 
 export default router;

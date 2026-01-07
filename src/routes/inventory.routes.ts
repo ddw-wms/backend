@@ -7,7 +7,7 @@ import {
     getMovementHistory
 }
     from '../controllers/inventory.controller';
-import { authMiddleware } from '../middleware/auth.middleware';
+import { authMiddleware, hasPermission } from '../middleware/auth.middleware';
 
 const router = express.Router();
 
@@ -15,15 +15,15 @@ const router = express.Router();
 router.use(authMiddleware);
 
 // Get inventory summary for warehouse
-router.get('/summary', getInventorySummary);
+router.get('/summary', hasPermission('view_inventory'), getInventorySummary);
 
 // Get available stock with pagination
-router.get('/available-stock', getAvailableStock);
+router.get('/available-stock', hasPermission('view_inventory'), getAvailableStock);
 
 // Get stock filtered by status
-router.get('/by-status', getStockByStatus);
+router.get('/by-status', hasPermission('view_inventory'), getStockByStatus);
 
 // Get movement history for a WSN
-router.get('/movement-history', getMovementHistory);
+router.get('/movement-history', hasPermission('view_inventory'), getMovementHistory);
 
 export default router;

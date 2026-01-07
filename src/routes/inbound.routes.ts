@@ -2,7 +2,7 @@
 import express, { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import * as inboundController from '../controllers/inbound.controller';
 import { multiInboundEntry } from "../controllers/inbound.controller";
 
@@ -33,15 +33,15 @@ const upload = multer({
   }
 });
 
-// Routes - admin, manager, operator can access
-router.post('/', authMiddleware, hasRole('admin', 'manager', 'operator'), inboundController.createInboundEntry);
-router.get('/master-data/:wsn', authMiddleware, hasRole('admin', 'manager', 'operator'), inboundController.getMasterDataByWSN);
-router.post('/bulk-upload', authMiddleware, hasRole('admin', 'manager', 'operator'), upload.single('file'), inboundController.bulkInboundUpload);
-router.post('/multi-entry', authMiddleware, hasRole('admin', 'manager', 'operator'), inboundController.multiInboundEntry);
-router.get('/', authMiddleware, hasRole('admin', 'manager', 'operator'), inboundController.getInboundList);
-router.get('/batches', authMiddleware, hasRole('admin', 'manager', 'operator'), inboundController.getInboundBatches);
-router.delete('/batches/:batchId', authMiddleware, hasRole('admin', 'operator'), inboundController.deleteInboundBatch); // Only admin and operator can delete
-router.get('/racks/:warehouseId', authMiddleware, hasRole('admin', 'manager', 'operator'), inboundController.getWarehouseRacks);
+// Routes - now using permission-based access control
+router.post('/', authMiddleware, hasPermission('create_inbound_single'), inboundController.createInboundEntry);
+router.get('/master-data/:wsn', authMiddleware, hasPermission('view_inbound'), inboundController.getMasterDataByWSN);
+router.post('/bulk-upload', authMiddleware, hasPermission('upload_inbound_bulk'), upload.single('file'), inboundController.bulkInboundUpload);
+router.post('/multi-entry', authMiddleware, hasPermission('create_inbound_multi'), inboundController.multiInboundEntry);
+router.get('/', authMiddleware, hasPermission('view_inbound'), inboundController.getInboundList);
+router.get('/batches', authMiddleware, hasPermission('view_inbound'), inboundController.getInboundBatches);
+router.delete('/batches/:batchId', authMiddleware, hasPermission('delete_inbound'), inboundController.deleteInboundBatch);
+router.get('/racks/:warehouseId', authMiddleware, hasPermission('view_inbound'), inboundController.getWarehouseRacks);
 
 router.get('/brands', authMiddleware, inboundController.getBrands);
 router.get('/categories', authMiddleware, inboundController.getCategories);

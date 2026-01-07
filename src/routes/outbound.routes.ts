@@ -1,7 +1,7 @@
 // File Path = warehouse-backend/src/routes/outbound.routes.ts
 import { Router } from 'express';
 import multer from 'multer';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
 import {
   getAllOutboundWSNs,
   getPendingForOutbound,
@@ -26,25 +26,25 @@ const upload = multer({ storage: multer.memoryStorage() });
 // All routes require authentication
 router.use(authMiddleware);
 
-// GET routes - admin, manager, operator
-router.get('/all-wsns', hasRole('admin', 'manager', 'operator'), getAllOutboundWSNs);
-router.get('/pending', hasRole('admin', 'manager', 'operator'), getPendingForOutbound);
-router.get('/source-by-wsn', hasRole('admin', 'manager', 'operator'), getSourceByWSN);
-router.get('/list', hasRole('admin', 'manager', 'operator'), getList);
-router.get('/customers', hasRole('admin', 'manager', 'operator'), getCustomers);
-router.get('/existing-wsns', hasRole('admin', 'manager', 'operator'), getExistingWSNs);
-router.get('/batches', hasRole('admin', 'manager', 'operator'), getBatches);
-router.get('/export', hasRole('admin', 'manager'), exportToExcel);
-router.get('/brands', hasRole('admin', 'manager', 'operator'), getBrands);
-router.get('/categories', hasRole('admin', 'manager', 'operator'), getCategories);
-router.get('/sources', hasRole('admin', 'manager', 'operator'), getSources);
+// GET routes - permission-based access
+router.get('/all-wsns', hasPermission('view_outbound'), getAllOutboundWSNs);
+router.get('/pending', hasPermission('view_outbound'), getPendingForOutbound);
+router.get('/source-by-wsn', hasPermission('view_outbound'), getSourceByWSN);
+router.get('/list', hasPermission('view_outbound'), getList);
+router.get('/customers', hasPermission('view_outbound'), getCustomers);
+router.get('/existing-wsns', hasPermission('view_outbound'), getExistingWSNs);
+router.get('/batches', hasPermission('view_outbound'), getBatches);
+router.get('/export', hasPermission('export_outbound'), exportToExcel);
+router.get('/brands', hasPermission('view_outbound'), getBrands);
+router.get('/categories', hasPermission('view_outbound'), getCategories);
+router.get('/sources', hasPermission('view_outbound'), getSources);
 
-// POST routes - admin, operator
-router.post('/single', hasRole('admin', 'operator'), createSingleEntry);
-router.post('/multi', hasRole('admin', 'operator'), multiEntry);
-router.post('/bulk', hasRole('admin', 'operator'), upload.single('file'), bulkUpload);
+// POST routes - permission-based access
+router.post('/single', hasPermission('create_outbound_single'), createSingleEntry);
+router.post('/multi', hasPermission('create_outbound_multi'), multiEntry);
+router.post('/bulk', hasPermission('upload_outbound_bulk'), upload.single('file'), bulkUpload);
 
-// DELETE routes - admin only
-router.delete('/batch/:batchId', hasRole('admin'), deleteBatch);
+// DELETE routes - permission-based access
+router.delete('/batch/:batchId', hasPermission('delete_outbound'), deleteBatch);
 
 export default router;
