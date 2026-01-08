@@ -21,7 +21,8 @@ router.use(authMiddleware);
 router.get('/source-by-wsn', hasPermission('view_picking'), getSourceByWSN);
 
 // POST multi-entry with auto batch ID
-router.post('/multi-entry', hasPermission('create_picking_multi'), multiPickingEntry);
+// Temporary: allow picker role to submit while permission settings are fixed
+router.post('/multi-entry', hasRole('admin', 'manager', 'picker'), multiPickingEntry);
 
 // GET picking list with filters & pagination
 router.get('/list', hasPermission('view_picking'), getPickingList);
