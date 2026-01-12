@@ -1,6 +1,11 @@
 // File Path = warehouse-backend/src/routes/picking.routes.ts
 import { Router } from 'express';
-import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, } from '../middleware/auth.middleware';
+import {
+  requirePermission,
+  requireWarehouseAccess,
+  injectWarehouseFilter
+} from '../middleware/rbac.middleware';
 import {
   getSourceByWSN,
   multiPickingEntry,
@@ -17,29 +22,18 @@ const router = Router();
 // All picking routes require authentication
 router.use(authMiddleware);
 
-// GET source data by WSN (QC → INBOUND → MASTER priority)
-router.get('/source-by-wsn', hasPermission('view_picking'), getSourceByWSN);
+// View routes - require view permission
+router.get('/source-by-wsn', requirePermission('feature:picking:view'), getSourceByWSN);
+router.get('/list', injectWarehouseFilter, requirePermission('feature:picking:view'), getPickingList);
+router.get('/customers', requirePermission('feature:picking:view'), getCustomers);
+router.get('/check-wsn', requirePermission('feature:picking:view'), checkWSNExists);
+router.get('/existing-wsns', injectWarehouseFilter, requirePermission('feature:picking:view'), getExistingWSNs);
+router.get('/batches', injectWarehouseFilter, requirePermission('feature:picking:view'), getBatches);
 
-// POST multi-entry with auto batch ID
-// Temporary: allow picker role to submit while permission settings are fixed
-router.post('/multi-entry', hasRole('admin', 'manager', 'picker'), multiPickingEntry);
+// Create routes - require create permission
+router.post('/multi-entry', requireWarehouseAccess, requirePermission('feature:picking:create'), multiPickingEntry);
 
-// GET picking list with filters & pagination
-router.get('/list', hasPermission('view_picking'), getPickingList);
-
-// GET customers from customers table
-router.get('/customers', hasPermission('view_picking'), getCustomers);
-
-// GET check if WSN exists
-router.get('/check-wsn', hasPermission('view_picking'), checkWSNExists);
-
-// GET all existing WSNs
-router.get('/existing-wsns', hasPermission('view_picking'), getExistingWSNs);
-
-// GET batches
-router.get('/batches', hasPermission('view_picking'), getBatches);
-
-// DELETE batch
-router.delete('/batch/:batchId', hasPermission('delete_picking'), deleteBatch);
+// Delete routes - require delete permission
+router.delete('/batch/:batchId', requirePermission('feature:picking:delete'), deleteBatch);
 
 export default router;

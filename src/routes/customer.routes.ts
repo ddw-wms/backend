@@ -1,6 +1,11 @@
 // File Path = warehouse-backend/src/routes/customer.routes.ts
 import { Router } from 'express';
-import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import {
+  requirePermission,
+  requireWarehouseAccess,
+  injectWarehouseFilter
+} from '../middleware/rbac.middleware';
 import {
   getCustomers,
   getCustomerById,
@@ -15,18 +20,18 @@ const router = Router();
 // All routes require authentication
 router.use(authMiddleware);
 
-// GET routes - permission-based access
-router.get('/', hasPermission('view_customers'), getCustomers);
-router.get('/names', hasPermission('view_customers'), getCustomerNames);
-router.get('/:id', hasPermission('view_customers'), getCustomerById);
+// View routes - require view permission
+router.get('/', injectWarehouseFilter, requirePermission('feature:customers:view'), getCustomers);
+router.get('/names', injectWarehouseFilter, requirePermission('feature:customers:view'), getCustomerNames);
+router.get('/:id', requirePermission('feature:customers:view'), getCustomerById);
 
-// POST routes
-router.post('/', hasPermission('create_customer'), createCustomer);
+// Create routes - require create permission
+router.post('/', requireWarehouseAccess, requirePermission('feature:customers:create'), createCustomer);
 
-// PUT routes
-router.put('/:id', hasPermission('edit_customer'), updateCustomer);
+// Edit routes - require edit permission
+router.put('/:id', requirePermission('feature:customers:edit'), updateCustomer);
 
-// DELETE routes
-router.delete('/:id', hasPermission('delete_customer'), deleteCustomer);
+// Delete routes - require delete permission
+router.delete('/:id', requirePermission('feature:customers:delete'), deleteCustomer);
 
 export default router;

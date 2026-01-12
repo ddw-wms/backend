@@ -1,7 +1,12 @@
 // File Path = warehouse-backend/src/routes/outbound.routes.ts
 import { Router } from 'express';
 import multer from 'multer';
-import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole, } from '../middleware/auth.middleware';
+import {
+  requirePermission,
+  requireWarehouseAccess,
+  injectWarehouseFilter
+} from '../middleware/rbac.middleware';
 import {
   getAllOutboundWSNs,
   getPendingForOutbound,
@@ -26,25 +31,27 @@ const upload = multer({ storage: multer.memoryStorage() });
 // All routes require authentication
 router.use(authMiddleware);
 
-// GET routes - permission-based access
-router.get('/all-wsns', hasPermission('view_outbound'), getAllOutboundWSNs);
-router.get('/pending', hasPermission('view_outbound'), getPendingForOutbound);
-router.get('/source-by-wsn', hasPermission('view_outbound'), getSourceByWSN);
-router.get('/list', hasPermission('view_outbound'), getList);
-router.get('/customers', hasPermission('view_outbound'), getCustomers);
-router.get('/existing-wsns', hasPermission('view_outbound'), getExistingWSNs);
-router.get('/batches', hasPermission('view_outbound'), getBatches);
-router.get('/export', hasPermission('export_outbound'), exportToExcel);
-router.get('/brands', hasPermission('view_outbound'), getBrands);
-router.get('/categories', hasPermission('view_outbound'), getCategories);
-router.get('/sources', hasPermission('view_outbound'), getSources);
+// View routes - require view permission
+router.get('/all-wsns', injectWarehouseFilter, requirePermission('feature:outbound:view'), getAllOutboundWSNs);
+router.get('/pending', injectWarehouseFilter, requirePermission('feature:outbound:view'), getPendingForOutbound);
+router.get('/source-by-wsn', requirePermission('feature:outbound:view'), getSourceByWSN);
+router.get('/list', injectWarehouseFilter, requirePermission('feature:outbound:view'), getList);
+router.get('/customers', requirePermission('feature:outbound:view'), getCustomers);
+router.get('/existing-wsns', injectWarehouseFilter, requirePermission('feature:outbound:view'), getExistingWSNs);
+router.get('/batches', injectWarehouseFilter, requirePermission('feature:outbound:view'), getBatches);
+router.get('/brands', requirePermission('feature:outbound:view'), getBrands);
+router.get('/categories', requirePermission('feature:outbound:view'), getCategories);
+router.get('/sources', requirePermission('feature:outbound:view'), getSources);
 
-// POST routes - permission-based access
-router.post('/single', hasPermission('create_outbound_single'), createSingleEntry);
-router.post('/multi', hasPermission('create_outbound_multi'), multiEntry);
-router.post('/bulk', hasPermission('upload_outbound_bulk'), upload.single('file'), bulkUpload);
+// Export routes - require export permission
+router.get('/export', injectWarehouseFilter, requirePermission('feature:outbound:export'), exportToExcel);
 
-// DELETE routes - permission-based access
-router.delete('/batch/:batchId', hasPermission('delete_outbound'), deleteBatch);
+// Create routes - require create permission
+router.post('/single', requireWarehouseAccess, requirePermission('feature:outbound:create'), createSingleEntry);
+router.post('/multi', requireWarehouseAccess, requirePermission('feature:outbound:create'), multiEntry);
+router.post('/bulk', requireWarehouseAccess, requirePermission('feature:outbound:create'), upload.single('file'), bulkUpload);
+
+// Delete routes - require delete permission
+router.delete('/batch/:batchId', requirePermission('feature:outbound:delete'), deleteBatch);
 
 export default router;

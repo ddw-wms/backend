@@ -27,8 +27,9 @@ import dashboardRoutes from './routes/dashboard.routes';
 import inventoryRoutes from './routes/inventory.routes';
 import reportsRoutes from './routes/reports.routes';
 import backupRoutes from './routes/backup.routes';
-import debugRoutes from './routes/debug.routes';
 import permissionsRoutes from './routes/permissions.routes';
+import uiAccessRoutes from './routes/ui-access.routes';
+
 import { isDbReady } from "./config/database";
 import { apiTimeout } from './middleware/timeout.middleware';
 import { backupScheduler } from './services/backupScheduler';
@@ -142,8 +143,9 @@ app.use('/api/inventory', inventoryRoutes);
 
 app.use('/api/reports', reportsRoutes);
 app.use('/api/backups', backupRoutes);
-app.use('/api/debug', debugRoutes);
 app.use('/api/permissions', permissionsRoutes);
+app.use('/api/ui-access', uiAccessRoutes);
+
 
 
 // Health Check

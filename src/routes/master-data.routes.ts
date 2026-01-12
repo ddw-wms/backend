@@ -3,7 +3,7 @@ import express, { NextFunction, Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole } from '../middleware/auth.middleware';
 import * as ctrl from '../controllers/master-data.controller';
 
 const router = express.Router();
@@ -27,21 +27,21 @@ const upload = multer({
 router.use(authMiddleware);
 
 // Template download
-router.get('/download-template', hasPermission('view_master_data'), ctrl.downloadTemplate);
+router.get('/download-template', ctrl.downloadTemplate);
 
 // View routes
-router.get('/', hasPermission('view_master_data'), ctrl.getMasterData);
-router.get('/batches', hasPermission('view_master_data'), ctrl.getBatches);
-router.get('/export', hasPermission('export_master_data'), ctrl.exportMasterData);
+router.get('/', ctrl.getMasterData);
+router.get('/batches', ctrl.getBatches);
+router.get('/export', ctrl.exportMasterData);
 
 // Upload routes
-router.post('/upload', hasPermission('create_master_data'), upload.single('file'), ctrl.uploadMasterData);
-router.get('/upload/progress/:jobId', hasPermission('view_master_data'), ctrl.getUploadProgress);
-router.get('/upload/active', hasPermission('view_master_data'), ctrl.getActiveUploads);
-router.delete('/upload/cancel/:jobId', hasPermission('create_master_data'), ctrl.cancelUpload);
+router.post('/upload', upload.single('file'), ctrl.uploadMasterData);
+router.get('/upload/progress/:jobId', ctrl.getUploadProgress);
+router.get('/upload/active', ctrl.getActiveUploads);
+router.delete('/upload/cancel/:jobId', ctrl.cancelUpload);
 
 // Delete routes
-router.delete('/:id', hasPermission('delete_master_data'), ctrl.deleteMasterData);
-router.delete('/batch/:batchId', hasPermission('delete_master_data'), ctrl.deleteBatch);
+router.delete('/:id', ctrl.deleteMasterData);
+router.delete('/batch/:batchId', ctrl.deleteBatch);
 
 export default router;

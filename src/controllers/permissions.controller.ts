@@ -1,435 +1,385 @@
-// File Path = wms_backend/src/controllers/permissions.controller.ts
-import { Request, Response } from 'express';
-import { query, getPool } from '../config/database';
+// File Path = warehouse-backend/src/controllers/permissions.controller.ts
+// Final Permissions Controller - Enable/Disable + Show/Hide
 
-// Get all available permissions
+import { Request, Response } from 'express';
+import { query } from '../config/database';
+
+// =============================================================
+// GET ALL PERMISSIONS (grouped by page)
+// =============================================================
 export const getAllPermissions = async (req: Request, res: Response) => {
     try {
-        const result = await query(
-            `SELECT * FROM permissions ORDER BY category, permission_name`
-        );
-        res.json(result.rows);
+        const result = await query(`
+            SELECT code, name, category, page, parent_code, sort_order
+            FROM permissions
+            ORDER BY sort_order
+        `);
+
+        // Group by page
+        const grouped: Record<string, any[]> = {};
+        result.rows.forEach(row => {
+            if (!grouped[row.page]) {
+                grouped[row.page] = [];
+            }
+            grouped[row.page].push(row);
+        });
+
+        res.json({
+            permissions: result.rows,
+            grouped
+        });
     } catch (error: any) {
-        console.error('Error fetching permissions:', error);
+        console.error('Get all permissions error:', error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// Get permissions grouped by category
-export const getPermissionsByCategory = async (req: Request, res: Response) => {
+// =============================================================
+// GET MY PERMISSIONS (for current logged-in user)
+// =============================================================
+export const getMyPermissions = async (req: Request, res: Response) => {
     try {
-        const result = await query(
-            `SELECT 
-        category,
-        json_agg(
-          json_build_object(
-            'id', id,
-            'permission_key', permission_key,
-            'permission_name', permission_name,
-            'description', description
-          ) ORDER BY permission_name
-        ) as permissions
-      FROM permissions
-      GROUP BY category
-      ORDER BY category`
-        );
-        res.json(result.rows);
+        const user = (req as any).user;
+
+        // Super admin gets everything enabled and visible
+        if (user.role === 'super_admin' || user.role === 'admin') {
+            const perms = await query(`
+                SELECT code, name, category, page
+                FROM permissions
+                ORDER BY sort_order
+            `);
+
+            const permissions: Record<string, any> = {};
+            perms.rows.forEach(p => {
+                permissions[p.code] = {
+                    name: p.name,
+                    category: p.category,
+                    page: p.page,
+                    is_enabled: true,
+                    is_visible: true,
+                    source: 'admin'
+                };
+            });
+
+            return res.json({
+                permissions,
+                role: user.role,
+                isAdmin: true
+            });
+        }
+
+        // Regular users - get from effective_user_permissions view
+        const result = await query(`
+            SELECT 
+                permission_code as code,
+                permission_name as name,
+                category,
+                page,
+                is_enabled,
+                is_visible,
+                permission_source as source
+            FROM effective_user_permissions
+            WHERE user_id = $1
+            ORDER BY sort_order
+        `, [user.userId]);
+
+        const permissions: Record<string, any> = {};
+        result.rows.forEach(p => {
+            permissions[p.code] = {
+                name: p.name,
+                category: p.category,
+                page: p.page,
+                is_enabled: p.is_enabled,
+                is_visible: p.is_visible,
+                source: p.source
+            };
+        });
+
+        res.json({
+            permissions,
+            role: user.role,
+            isAdmin: false
+        });
     } catch (error: any) {
-        console.error('Error fetching permissions by category:', error);
+        console.error('Get my permissions error:', error);
+        // Fallback for admin
+        const user = (req as any).user;
+        if (user.role === 'super_admin' || user.role === 'admin') {
+            return res.json({ permissions: {}, role: user.role, isAdmin: true, legacy: true });
+        }
         res.status(500).json({ error: error.message });
     }
 };
 
-// Get role permissions (all permissions with enabled status for a role)
+// =============================================================
+// GET ALL ROLES
+// =============================================================
+export const getRoles = async (req: Request, res: Response) => {
+    try {
+        const result = await query(`
+            SELECT 
+                r.id, r.name, r.description, r.is_system_role, r.is_active, r.priority,
+                COUNT(DISTINCT u.id) as user_count
+            FROM roles r
+            LEFT JOIN users u ON u.role = r.name AND u.is_active = true
+            GROUP BY r.id
+            ORDER BY r.priority DESC
+        `);
+
+        res.json(result.rows);
+    } catch (error: any) {
+        console.error('Get roles error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// =============================================================
+// GET ROLE PERMISSIONS
+// =============================================================
 export const getRolePermissions = async (req: Request, res: Response) => {
     try {
-        const { role } = req.params;
+        const { roleId } = req.params;
 
-        const result = await query(
-            `SELECT 
-        p.id,
-        p.permission_key,
-        p.permission_name,
-        p.category,
-        p.description,
-        COALESCE(rp.enabled, false) as enabled,
-        COALESCE(rp.id, 0) as role_permission_id
-      FROM permissions p
-      LEFT JOIN role_permissions rp ON p.permission_key = rp.permission_key AND rp.role = $1
-      ORDER BY p.category, p.permission_name`,
-            [role]
-        );
+        const result = await query(`
+            SELECT 
+                p.code,
+                p.name,
+                p.category,
+                p.page,
+                p.parent_code,
+                p.sort_order,
+                COALESCE(rp.is_enabled, false) as is_enabled,
+                COALESCE(rp.is_visible, false) as is_visible
+            FROM permissions p
+            LEFT JOIN role_permissions rp ON rp.permission_code = p.code AND rp.role_id = $1
+            ORDER BY p.sort_order
+        `, [roleId]);
 
         res.json(result.rows);
     } catch (error: any) {
-        console.error('Error fetching role permissions:', error);
+        console.error('Get role permissions error:', error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// Get all roles with their permission counts
-export const getRolesWithPermissions = async (req: Request, res: Response) => {
+// =============================================================
+// UPDATE ROLE PERMISSIONS
+// =============================================================
+export const updateRolePermissions = async (req: Request, res: Response) => {
     try {
-        const roles = ['admin', 'manager', 'operator', 'qc', 'picker'];
-
-        const result = await query(
-            `SELECT 
-        role,
-        COUNT(*) FILTER (WHERE enabled = true) as enabled_count,
-        COUNT(*) as total_count
-      FROM role_permissions
-      WHERE role = ANY($1::text[])
-      GROUP BY role`,
-            [roles]
-        );
-
-        // Add roles that don't have any permissions yet
-        const existingRoles = result.rows.map((r: any) => r.role);
-        const missingRoles = roles.filter(r => !existingRoles.includes(r));
-
-        const allRoles = [
-            ...result.rows,
-            ...missingRoles.map(role => ({ role, enabled_count: 0, total_count: 0 }))
-        ];
-
-        res.json(allRoles);
-    } catch (error: any) {
-        console.error('Error fetching roles:', error);
-        res.status(500).json({ error: error.message });
-    }
-};
-
-// Update role permission (enable/disable)
-export const updateRolePermission = async (req: Request, res: Response) => {
-    try {
-        const { role, permissionKey } = req.params;
-        const { enabled } = req.body;
-
-        // Check if permission exists
-        const permCheck = await query(
-            'SELECT id FROM permissions WHERE permission_key = $1',
-            [permissionKey]
-        );
-
-        if (permCheck.rows.length === 0) {
-            return res.status(404).json({ error: 'Permission not found' });
-        }
-
-        // Upsert role permission
-        const result = await query(
-            `INSERT INTO role_permissions (role, permission_key, enabled)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (role, permission_key)
-       DO UPDATE SET enabled = $3, updated_at = NOW()
-       RETURNING *`,
-            [role, permissionKey, enabled]
-        );
-
-        res.json(result.rows[0]);
-    } catch (error: any) {
-        console.error('Error updating role permission:', error);
-        res.status(500).json({ error: error.message });
-    }
-};
-
-// Bulk update role permissions
-export const bulkUpdateRolePermissions = async (req: Request, res: Response) => {
-    try {
-        const { role } = req.params;
-        const { permissions } = req.body; // Array of { permission_key, enabled }
+        const { roleId } = req.params;
+        const { permissions } = req.body; // Array of { code, is_enabled, is_visible }
 
         if (!Array.isArray(permissions)) {
-            return res.status(400).json({ error: 'Permissions must be an array' });
+            return res.status(400).json({ error: 'Permissions array required' });
         }
 
-        console.log(`📝 Bulk updating ${permissions.length} permissions for role: ${role}`);
+        await query('BEGIN');
 
-        const pool = getPool();
-        const client = await pool.connect();
-
-        try {
-            await client.query('BEGIN');
-
-            // Optimized: Use single query with unnest arrays instead of loop
-            const permissionKeys = permissions.map(p => p.permission_key);
-            const enabledValues = permissions.map(p => p.enabled);
-
-            await client.query(
-                `INSERT INTO role_permissions (role, permission_key, enabled)
-                 SELECT $1, unnest($2::text[]), unnest($3::boolean[])
-                 ON CONFLICT (role, permission_key)
-                 DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()`,
-                [role, permissionKeys, enabledValues]
-            );
-
-            await client.query('COMMIT');
-            console.log(`✅ Successfully updated ${permissions.length} permissions for ${role}`);
-            res.json({ message: 'Permissions updated successfully', count: permissions.length });
-        } catch (error) {
-            await client.query('ROLLBACK');
-            console.error('❌ Transaction rolled back:', error);
-            throw error;
-        } finally {
-            client.release();
+        for (const perm of permissions) {
+            await query(`
+                INSERT INTO role_permissions (role_id, permission_code, is_enabled, is_visible)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (role_id, permission_code)
+                DO UPDATE SET 
+                    is_enabled = $3, 
+                    is_visible = $4,
+                    updated_at = NOW()
+            `, [roleId, perm.code, perm.is_enabled, perm.is_visible]);
         }
+
+        await query('COMMIT');
+
+        res.json({ success: true, message: 'Role permissions updated' });
     } catch (error: any) {
-        console.error('Error bulk updating permissions:', error);
+        await query('ROLLBACK');
+        console.error('Update role permissions error:', error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// Get user-specific permissions (overrides)
-export const getUserPermissions = async (req: Request, res: Response) => {
+// =============================================================
+// GET USER OVERRIDES
+// =============================================================
+export const getUserOverrides = async (req: Request, res: Response) => {
     try {
         const { userId } = req.params;
 
-        const result = await query(
-            `SELECT 
-        p.id,
-        p.permission_key,
-        p.permission_name,
-        p.category,
-        p.description,
-        up.enabled,
-        up.id as user_permission_id
-      FROM user_permissions up
-      JOIN permissions p ON up.permission_key = p.permission_key
-      WHERE up.user_id = $1
-      ORDER BY p.category, p.permission_name`,
-            [userId]
-        );
-
-        res.json(result.rows);
-    } catch (error: any) {
-        console.error('Error fetching user permissions:', error);
-        res.status(500).json({ error: error.message });
-    }
-};
-
-// Get effective permissions for a user (combines role and user-specific permissions)
-export const getEffectiveUserPermissions = async (req: Request, res: Response) => {
-    try {
-        const { userId } = req.params;
-
-        // Get user's role
-        const userResult = await query(
-            'SELECT role FROM users WHERE id = $1',
-            [userId]
-        );
-
+        // Get user's role first
+        const userResult = await query('SELECT role FROM users WHERE id = $1', [userId]);
         if (userResult.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
-
         const userRole = userResult.rows[0].role;
 
-        // Get all permissions with effective status
-        const result = await query(
-            `SELECT 
-        p.id,
-        p.permission_key,
-        p.permission_name,
-        p.category,
-        p.description,
-        COALESCE(up.enabled, rp.enabled, false) as enabled,
-        CASE 
-          WHEN up.id IS NOT NULL THEN 'user'
-          WHEN rp.id IS NOT NULL THEN 'role'
-          ELSE 'default'
-        END as source
-      FROM permissions p
-      LEFT JOIN role_permissions rp ON p.permission_key = rp.permission_key AND rp.role = $1
-      LEFT JOIN user_permissions up ON p.permission_key = up.permission_key AND up.user_id = $2
-      ORDER BY p.category, p.permission_name`,
-            [userRole, userId]
-        );
+        // Get role's default permissions with user overrides
+        const result = await query(`
+            SELECT 
+                p.code,
+                p.name,
+                p.category,
+                p.page,
+                p.parent_code,
+                p.sort_order,
+                COALESCE(rp.is_enabled, false) as role_enabled,
+                COALESCE(rp.is_visible, false) as role_visible,
+                upo.is_enabled as override_enabled,
+                upo.is_visible as override_visible,
+                COALESCE(upo.is_enabled, rp.is_enabled, false) as effective_enabled,
+                COALESCE(upo.is_visible, rp.is_visible, false) as effective_visible
+            FROM permissions p
+            LEFT JOIN roles r ON r.name = $2
+            LEFT JOIN role_permissions rp ON rp.permission_code = p.code AND rp.role_id = r.id
+            LEFT JOIN user_permission_overrides upo ON upo.permission_code = p.code AND upo.user_id = $1
+            ORDER BY p.sort_order
+        `, [userId, userRole]);
 
         res.json({
-            userId: parseInt(userId),
-            role: userRole,
+            userRole,
             permissions: result.rows
         });
     } catch (error: any) {
-        console.error('Error fetching effective user permissions:', error);
+        console.error('Get user overrides error:', error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// Update user-specific permission
-export const updateUserPermission = async (req: Request, res: Response) => {
+// =============================================================
+// UPDATE USER OVERRIDES
+// =============================================================
+export const updateUserOverrides = async (req: Request, res: Response) => {
     try {
-        const { userId, permissionKey } = req.params;
-        const { enabled } = req.body;
+        const { userId } = req.params;
+        const { overrides } = req.body; // Array of { code, is_enabled, is_visible } - null values mean use role default
 
-        // Check if user exists
-        const userCheck = await query('SELECT id FROM users WHERE id = $1', [userId]);
-        if (userCheck.rows.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
+        if (!Array.isArray(overrides)) {
+            return res.status(400).json({ error: 'Overrides array required' });
         }
 
-        // Check if permission exists
-        const permCheck = await query(
-            'SELECT id FROM permissions WHERE permission_key = $1',
-            [permissionKey]
-        );
-        if (permCheck.rows.length === 0) {
-            return res.status(404).json({ error: 'Permission not found' });
+        await query('BEGIN');
+
+        // First, delete all existing overrides for this user
+        await query('DELETE FROM user_permission_overrides WHERE user_id = $1', [userId]);
+
+        // Insert new overrides (only where is_enabled or is_visible is not null)
+        for (const ovr of overrides) {
+            if (ovr.is_enabled !== null || ovr.is_visible !== null) {
+                await query(`
+                    INSERT INTO user_permission_overrides (user_id, permission_code, is_enabled, is_visible)
+                    VALUES ($1, $2, $3, $4)
+                `, [userId, ovr.code, ovr.is_enabled, ovr.is_visible]);
+            }
         }
 
-        // Upsert user permission
-        const result = await query(
-            `INSERT INTO user_permissions (user_id, permission_key, enabled)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (user_id, permission_key)
-       DO UPDATE SET enabled = $3, updated_at = NOW()
-       RETURNING *`,
-            [userId, permissionKey, enabled]
-        );
+        await query('COMMIT');
 
-        res.json(result.rows[0]);
+        res.json({ success: true, message: 'User overrides updated' });
     } catch (error: any) {
-        console.error('Error updating user permission:', error);
+        await query('ROLLBACK');
+        console.error('Update user overrides error:', error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// Delete user-specific permission (revert to role default)
-export const deleteUserPermission = async (req: Request, res: Response) => {
+// =============================================================
+// GET USER WAREHOUSES
+// =============================================================
+export const getUserWarehouses = async (req: Request, res: Response) => {
     try {
-        const { userId, permissionKey } = req.params;
+        const { userId } = req.params;
 
-        const result = await query(
-            'DELETE FROM user_permissions WHERE user_id = $1 AND permission_key = $2 RETURNING *',
-            [userId, permissionKey]
-        );
+        const result = await query(`
+            SELECT 
+                uw.warehouse_id,
+                w.name as warehouse_name,
+                w.code as warehouse_code,
+                uw.is_default
+            FROM user_warehouses uw
+            JOIN warehouses w ON w.id = uw.warehouse_id
+            WHERE uw.user_id = $1 AND w.is_active = true
+            ORDER BY uw.is_default DESC, w.name
+        `, [userId]);
+
+        res.json(result.rows);
+    } catch (error: any) {
+        console.error('Get user warehouses error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// =============================================================
+// UPDATE USER WAREHOUSES
+// =============================================================
+export const updateUserWarehouses = async (req: Request, res: Response) => {
+    try {
+        const { userId } = req.params;
+        const { warehouse_ids, default_warehouse_id } = req.body;
+
+        if (!Array.isArray(warehouse_ids)) {
+            return res.status(400).json({ error: 'warehouse_ids array required' });
+        }
+
+        await query('BEGIN');
+
+        // Delete existing warehouse assignments
+        await query('DELETE FROM user_warehouses WHERE user_id = $1', [userId]);
+
+        // Insert new assignments
+        for (const whId of warehouse_ids) {
+            await query(`
+                INSERT INTO user_warehouses (user_id, warehouse_id, is_default)
+                VALUES ($1, $2, $3)
+            `, [userId, whId, whId === default_warehouse_id]);
+        }
+
+        await query('COMMIT');
+
+        res.json({ success: true, message: 'User warehouses updated' });
+    } catch (error: any) {
+        await query('ROLLBACK');
+        console.error('Update user warehouses error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// =============================================================
+// CHECK PERMISSION (API endpoint for frontend)
+// =============================================================
+export const checkPermission = async (req: Request, res: Response) => {
+    try {
+        const user = (req as any).user;
+        const { code } = req.params;
+
+        // Admin always has permission
+        if (user.role === 'super_admin' || user.role === 'admin') {
+            return res.json({
+                code,
+                is_enabled: true,
+                is_visible: true
+            });
+        }
+
+        const result = await query(`
+            SELECT is_enabled, is_visible
+            FROM effective_user_permissions
+            WHERE user_id = $1 AND permission_code = $2
+        `, [user.userId, code]);
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'User permission not found' });
-        }
-
-        res.json({ message: 'User permission deleted successfully' });
-    } catch (error: any) {
-        console.error('Error deleting user permission:', error);
-        res.status(500).json({ error: error.message });
-    }
-};
-
-// Reset all permissions for a role to defaults
-export const resetRolePermissions = async (req: Request, res: Response) => {
-    try {
-        const { role } = req.params;
-
-        // Delete existing role permissions
-        await query('DELETE FROM role_permissions WHERE role = $1', [role]);
-
-        // Re-insert default permissions based on role
-        let defaultPermissions: string[] = [];
-
-        switch (role) {
-            case 'admin':
-                // Admin gets all permissions
-                const allPerms = await query('SELECT permission_key FROM permissions');
-                defaultPermissions = allPerms.rows.map((r: any) => r.permission_key);
-                break;
-
-            case 'manager':
-                const managerPerms = await query(
-                    `SELECT permission_key FROM permissions 
-           WHERE category IN ('dashboard', 'inbound', 'outbound', 'inventory', 'picking', 'qc', 'reports', 'customers', 'master-data', 'warehouses', 'racks')`
-                );
-                defaultPermissions = managerPerms.rows.map((r: any) => r.permission_key);
-                break;
-
-            case 'operator':
-                defaultPermissions = [
-                    'view_dashboard', 'view_dashboard_stats',
-                    'view_inbound', 'receive_inbound',
-                    'view_outbound', 'dispatch_outbound',
-                    'view_inventory',
-                    'view_picking', 'complete_picking',
-                    'view_customers',
-                    'print_labels'
-                ];
-                break;
-
-            case 'qc':
-                defaultPermissions = [
-                    'view_dashboard', 'view_dashboard_stats',
-                    'view_qc', 'create_qc', 'edit_qc', 'approve_qc', 'reject_qc', 'export_qc',
-                    'view_inventory',
-                    'view_inbound',
-                    'print_labels'
-                ];
-                break;
-
-            case 'picker':
-                defaultPermissions = [
-                    'view_dashboard', 'view_dashboard_stats',
-                    'view_picking', 'complete_picking',
-                    'view_inventory',
-                    'view_outbound',
-                    'print_labels'
-                ];
-                break;
-        }
-
-        // Insert default permissions
-        for (const permKey of defaultPermissions) {
-            await query(
-                `INSERT INTO role_permissions (role, permission_key, enabled)
-         VALUES ($1, $2, true)
-         ON CONFLICT (role, permission_key) DO NOTHING`,
-                [role, permKey]
-            );
+            return res.json({
+                code,
+                is_enabled: false,
+                is_visible: false
+            });
         }
 
         res.json({
-            message: 'Role permissions reset to defaults',
-            role,
-            permissionsCount: defaultPermissions.length
+            code,
+            is_enabled: result.rows[0].is_enabled,
+            is_visible: result.rows[0].is_visible
         });
     } catch (error: any) {
-        console.error('Error resetting role permissions:', error);
-        res.status(500).json({ error: error.message });
-    }
-};
-
-// Get permission check result for current user
-export const checkMyPermissions = async (req: Request, res: Response) => {
-    try {
-        const userId = req.user?.userId;
-        const userRole = req.user?.role;
-
-        if (!userId || !userRole) {
-            return res.status(401).json({ error: 'User not authenticated' });
-        }
-
-        // Get all permissions with effective status
-        const result = await query(
-            `SELECT 
-        p.permission_key,
-        p.category,
-        COALESCE(up.enabled, rp.enabled, false) as enabled
-      FROM permissions p
-      LEFT JOIN role_permissions rp ON p.permission_key = rp.permission_key AND rp.role = $1
-      LEFT JOIN user_permissions up ON p.permission_key = up.permission_key AND up.user_id = $2
-      ORDER BY p.category, p.permission_key`,
-            [userRole, userId]
-        );
-
-        // Convert to object format for easier lookup
-        const permissions: Record<string, boolean> = {};
-        result.rows.forEach((row: any) => {
-            permissions[row.permission_key] = row.enabled;
-        });
-
-        res.json({
-            userId,
-            role: userRole,
-            permissions
-        });
-    } catch (error: any) {
-        console.error('Error checking user permissions:', error);
+        console.error('Check permission error:', error);
         res.status(500).json({ error: error.message });
     }
 };

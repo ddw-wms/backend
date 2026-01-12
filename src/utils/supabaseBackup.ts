@@ -38,8 +38,8 @@ export async function createJSONBackup(options: BackupOptions = {}) {
         'inbound',
         'qc',
         'picking',
-        'outbound',
-        'permissions'
+        'outbound'
+
     ];
 
     if (options.includeUsers) {

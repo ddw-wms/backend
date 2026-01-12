@@ -31,6 +31,68 @@ export const login = async (req: Request, res: Response) => {
 
     await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
 
+    // Build permission map - handle case when RBAC tables don't exist
+    let permissions: Record<string, { can_access: boolean; is_visible: boolean }> = {};
+    let warehousesList: any[] = [];
+
+    // Try to fetch user permissions from RBAC system
+    try {
+      const permissionsResult = await query(`
+        SELECT 
+          permission_code, can_access, is_visible
+        FROM effective_user_permissions
+        WHERE user_id = $1 AND can_access = true
+      `, [user.id]);
+
+      for (const p of permissionsResult.rows) {
+        permissions[p.permission_code] = {
+          can_access: p.can_access,
+          is_visible: p.is_visible
+        };
+      }
+    } catch (permError: any) {
+      // Permissions tables don't exist - use legacy role-based access
+      console.log('Permission tables not found, using legacy role-based access');
+      if (user.role === 'admin' || user.role === 'super_admin') {
+        permissions = { '__legacy_admin__': { can_access: true, is_visible: true } };
+      }
+    }
+
+    // Fetch accessible warehouses - SEPARATE from permissions
+    try {
+      // First try user_warehouses table directly (more reliable than view)
+      const warehousesResult = await query(`
+        SELECT DISTINCT
+          uw.warehouse_id, 
+          w.name as warehouse_name, 
+          w.code as warehouse_code, 
+          uw.is_default
+        FROM user_warehouses uw
+        JOIN warehouses w ON w.id = uw.warehouse_id
+        WHERE uw.user_id = $1 AND w.is_active = true
+      `, [user.id]);
+
+      warehousesList = warehousesResult.rows;
+
+      // If user has warehouse restrictions, use them
+      // If empty, user has access to ALL warehouses (no restriction)
+      console.log(`User ${user.username} warehouse access: ${warehousesList.length > 0 ? warehousesList.map(w => w.warehouse_name).join(', ') : 'ALL (no restrictions)'}`);
+    } catch (whError: any) {
+      console.log('user_warehouses table not found, using legacy warehouse_id');
+      // Fallback to legacy warehouse_id
+      if (user.warehouse_id) {
+        const whResult = await query('SELECT id, name, code FROM warehouses WHERE id = $1', [user.warehouse_id]);
+        if (whResult.rows.length > 0) {
+          warehousesList = [{
+            warehouse_id: whResult.rows[0].id,
+            warehouse_name: whResult.rows[0].name,
+            warehouse_code: whResult.rows[0].code,
+            is_default: true
+          }];
+        }
+      }
+    }
+
     const token = generateToken({
       userId: user.id,
       username: user.username,
@@ -48,6 +110,9 @@ export const login = async (req: Request, res: Response) => {
         email: user.email,
         role: user.role,
         warehouseId: user.warehouse_id,
+        permissions,
+        warehouses: warehousesList,
+        defaultWarehouseId: warehousesList.find((w: any) => w.is_default)?.warehouse_id || user.warehouse_id
       },
     });
   } catch (error: any) {

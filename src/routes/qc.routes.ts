@@ -17,7 +17,12 @@ import {
   getAllQCWSNs,
 } from '../controllers/qc.controller';
 
-import { authMiddleware, hasRole, hasPermission } from '../middleware/auth.middleware';
+import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import {
+  requirePermission,
+  requireWarehouseAccess,
+  injectWarehouseFilter
+} from '../middleware/rbac.middleware';
 import { upload } from '../middleware/upload.middleware';
 
 const router = Router();
@@ -25,30 +30,25 @@ const router = Router();
 // Base authentication for all routes
 router.use(authMiddleware);
 
-// Pending items - permission-based access
-router.get('/pending-inbound', hasPermission('view_qc'), getPendingInboundForQC);
+// View routes - require view permission
+router.get('/pending-inbound', injectWarehouseFilter, requirePermission('feature:qc:view'), getPendingInboundForQC);
+router.get('/wsns/all', injectWarehouseFilter, requirePermission('feature:qc:view'), getAllQCWSNs);
+router.get('/list', injectWarehouseFilter, requirePermission('feature:qc:view'), getQCList);
+router.get('/stats', injectWarehouseFilter, requirePermission('feature:qc:view'), getQCStats);
+router.get('/batches', injectWarehouseFilter, requirePermission('feature:qc:view'), getQCBatches);
+router.get('/brands', requirePermission('feature:qc:view'), getQCBrands);
+router.get('/categories', requirePermission('feature:qc:view'), getQCCategories);
+router.get('/template', requirePermission('feature:qc:view'), getQCTemplate);
 
-// Get all QC'd WSNs (for duplicate checking)
-router.get('/wsns/all', hasPermission('view_qc'), getAllQCWSNs);
+// Create routes - require process permission
+router.post('/create', requireWarehouseAccess, requirePermission('feature:qc:process'), createQCEntry);
+router.post('/multi-entry', requireWarehouseAccess, requirePermission('feature:qc:process'), multiQCEntry);
+router.post('/bulk-upload', requireWarehouseAccess, requirePermission('feature:qc:process'), upload.single('file'), bulkQCUpload);
 
-// QC List & Operations
-router.get('/list', hasPermission('view_qc'), getQCList);
-router.post('/create', hasPermission('create_qc_single'), createQCEntry);
-router.delete('/delete/:qcId', hasPermission('delete_qc'), deleteQCEntry);
-
-// Bulk & Multi
-router.post('/bulk-upload', hasPermission('upload_qc_bulk'), upload.single('file'), bulkQCUpload);
-router.post('/multi-entry', hasPermission('create_qc_multi'), multiQCEntry);
-router.get('/template', hasPermission('view_qc'), getQCTemplate);
-
-// Stats & Batches
-router.get('/stats', hasPermission('view_qc'), getQCStats);
-router.get('/batches', hasPermission('view_qc'), getQCBatches);
-router.delete('/batch/:batchId', hasPermission('delete_qc'), deleteQCBatch);
-
-// Filters
-router.get('/brands', hasPermission('view_qc'), getQCBrands);
-router.get('/categories', hasPermission('view_qc'), getQCCategories);
+// Delete routes - require delete permission
+router.delete('/delete/:qcId', requirePermission('feature:qc:delete'), deleteQCEntry);
+router.delete('/batch/:batchId', requirePermission('feature:qc:delete'), deleteQCBatch);
+router.get('/categories', getQCCategories);
 
 // Export
 router.get('/export', exportQCData);
