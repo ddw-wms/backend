@@ -513,7 +513,7 @@ async function processInboundBulk(
 
 
 
-// MULTI-ENTRY - inbound fields only
+// MULTI-ENTRY - inbound fields only (OPTIMIZED for large batches)
 export const multiInboundEntry = async (req: Request, res: Response) => {
   try {
     const { entries, warehouse_id } = req.body;
@@ -536,12 +536,12 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
     const wsns = entries
       .map((e: any) => e.wsn)
       .filter(Boolean)
-      .map((v: any) => String(v).trim());
+      .map((v: any) => String(v).trim().toUpperCase());
 
-    // Existing WSN check
+    // Existing WSN check - single query for all WSNs
     const existingMap = new Map<string, number>();
     if (wsns.length > 0) {
-      const checkSql = `SELECT wsn, warehouse_id FROM inbound WHERE wsn = ANY($1)`;
+      const checkSql = `SELECT UPPER(wsn) as wsn, warehouse_id FROM inbound WHERE UPPER(wsn) = ANY($1)`;
       const checkRes = await query(checkSql, [wsns]);
 
       checkRes.rows.forEach((row: any) => {
@@ -551,11 +551,12 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
 
     const batchId = generateBatchId('MULTI');
 
-    let successCount = 0;
     const results: any[] = [];
+    const validEntries: any[] = [];
 
+    // ⚡ First pass: validate all entries and collect valid ones for bulk insert
     for (const entry of entries) {
-      const wsn = entry.wsn?.trim();
+      const wsn = entry.wsn?.trim()?.toUpperCase();
       if (!wsn) {
         results.push({
           wsn: 'EMPTY',
@@ -584,51 +585,119 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
         continue;
       }
 
-      const inboundDateRaw =
-        entry.inbound_date || new Date().toISOString().slice(0, 10);
-
-      const sql = `
-        INSERT INTO inbound (
-          wsn,
-          inbound_date,
-          vehicle_no,
-          product_serial_number,
-          rack_no,
-          unload_remarks,
-          warehouse_id,
-          warehouse_name,
-          batch_id,
-          created_by,
-          created_user_name
-        )
-        VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
-        )
-      `;
-
-      try {
-        await query(sql, [
-          wsn,
-          inboundDateRaw,
-          entry.vehicle_no || null,
-          entry.product_serial_number || null,
-          entry.rack_no || null,
-          entry.unload_remarks || null,
-          warehouse_id,
-          warehouseName,
-          batchId,
-          userId,
-          userName,
-        ]);
-
-        results.push({ wsn, status: 'SUCCESS', message: 'Created' });
-        successCount++;
-      } catch (err: any) {
+      // Check for duplicates within the batch itself
+      const isDuplicateInBatch = validEntries.some(ve => ve.wsn === wsn);
+      if (isDuplicateInBatch) {
         results.push({
           wsn,
-          status: 'ERROR',
-          message: err.message,
+          status: 'DUPLICATE',
+          message: 'Duplicate WSN within batch',
         });
+        continue;
+      }
+
+      const inboundDateRaw = entry.inbound_date || new Date().toISOString().slice(0, 10);
+
+      validEntries.push({
+        wsn,
+        inbound_date: inboundDateRaw,
+        vehicle_no: entry.vehicle_no || null,
+        product_serial_number: entry.product_serial_number || null,
+        rack_no: entry.rack_no || null,
+        unload_remarks: entry.unload_remarks || null,
+        warehouse_id,
+        warehouse_name: warehouseName,
+        batch_id: batchId,
+        created_by: userId,
+        created_user_name: userName,
+      });
+    }
+
+    let successCount = 0;
+
+    // ⚡ BULK INSERT: Insert all valid entries in batches of 100 for optimal performance
+    if (validEntries.length > 0) {
+      const BATCH_SIZE = 100;
+
+      for (let i = 0; i < validEntries.length; i += BATCH_SIZE) {
+        const batch = validEntries.slice(i, i + BATCH_SIZE);
+
+        // Build bulk insert query with multiple VALUES
+        const values: any[] = [];
+        const valuePlaceholders: string[] = [];
+
+        batch.forEach((entry, idx) => {
+          const offset = idx * 11;
+          valuePlaceholders.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
+          );
+          values.push(
+            entry.wsn,
+            entry.inbound_date,
+            entry.vehicle_no,
+            entry.product_serial_number,
+            entry.rack_no,
+            entry.unload_remarks,
+            entry.warehouse_id,
+            entry.warehouse_name,
+            entry.batch_id,
+            entry.created_by,
+            entry.created_user_name
+          );
+        });
+
+        const bulkSql = `
+          INSERT INTO inbound (
+            wsn,
+            inbound_date,
+            vehicle_no,
+            product_serial_number,
+            rack_no,
+            unload_remarks,
+            warehouse_id,
+            warehouse_name,
+            batch_id,
+            created_by,
+            created_user_name
+          )
+          VALUES ${valuePlaceholders.join(', ')}
+        `;
+
+        try {
+          await query(bulkSql, values);
+
+          // Mark all entries in this batch as successful
+          batch.forEach((entry) => {
+            results.push({ wsn: entry.wsn, status: 'SUCCESS', message: 'Created' });
+            successCount++;
+          });
+        } catch (err: any) {
+          // If bulk insert fails, fall back to individual inserts for this batch
+          console.log(`Bulk insert failed for batch starting at ${i}, falling back to individual inserts`);
+          for (const entry of batch) {
+            try {
+              await query(`
+                INSERT INTO inbound (
+                  wsn, inbound_date, vehicle_no, product_serial_number, rack_no,
+                  unload_remarks, warehouse_id, warehouse_name, batch_id, created_by, created_user_name
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+              `, [
+                entry.wsn, entry.inbound_date, entry.vehicle_no, entry.product_serial_number,
+                entry.rack_no, entry.unload_remarks, entry.warehouse_id, entry.warehouse_name,
+                entry.batch_id, entry.created_by, entry.created_user_name
+              ]);
+              results.push({ wsn: entry.wsn, status: 'SUCCESS', message: 'Created' });
+              successCount++;
+            } catch (individualErr: any) {
+              results.push({
+                wsn: entry.wsn,
+                status: 'ERROR',
+                message: individualErr.message,
+              });
+            }
+          }
+        }
       }
     }
 
