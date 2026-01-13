@@ -26,6 +26,12 @@ const upload = multer({
 // All routes require authentication
 router.use(authMiddleware);
 
+// Cache APIs for frontend IndexedDB sync
+router.get('/count', ctrl.getMasterDataCount);
+router.get('/batch', ctrl.getMasterDataBatch);
+router.get('/batch-list', ctrl.getMasterDataBatchList);  // Get list of all batches
+router.get('/by-batch', ctrl.getMasterDataByBatchIds);   // Get data for specific batch(es)
+
 // Template download
 router.get('/download-template', ctrl.downloadTemplate);
 
@@ -33,6 +39,12 @@ router.get('/download-template', ctrl.downloadTemplate);
 router.get('/', ctrl.getMasterData);
 router.get('/batches', ctrl.getBatches);
 router.get('/export', ctrl.exportMasterData);
+
+// Create single product
+router.post('/', ctrl.createMasterData);
+
+// Update product
+router.put('/:id', ctrl.updateMasterData);
 
 // Upload routes
 router.post('/upload', upload.single('file'), ctrl.uploadMasterData);

@@ -47,6 +47,131 @@ const convertUTCtoIST = (utcDate: Date): Date => {
   return istDate;
 };
 
+// ====== CACHE APIs for Frontend IndexedDB ======
+
+/**
+ * Get total count of master data records
+ * Used by frontend to know how many records to sync
+ */
+export const getMasterDataCount = async (req: Request, res: Response) => {
+  try {
+    const result = await query('SELECT COUNT(*) FROM master_data');
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (error: any) {
+    console.error('❌ Get master data count error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Get list of all batch IDs with counts and dates
+ * For batch-specific caching feature
+ */
+export const getMasterDataBatchList = async (req: Request, res: Response) => {
+  try {
+    const result = await query(`
+      SELECT 
+        batch_id,
+        COUNT(*) as count,
+        MIN(created_at) as created_at,
+        MAX(created_at) as last_updated
+      FROM master_data
+      WHERE batch_id IS NOT NULL AND batch_id != ''
+      GROUP BY batch_id
+      ORDER BY MAX(created_at) DESC
+      LIMIT 100
+    `);
+
+    res.json({
+      batches: result.rows.map((row: any) => ({
+        batch_id: row.batch_id,
+        count: parseInt(row.count),
+        created_at: row.created_at,
+        last_updated: row.last_updated
+      }))
+    });
+  } catch (error: any) {
+    console.error('❌ Get batch list error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Get all master data records for specific batch ID(s)
+ * For batch-specific caching - downloads only selected batch data
+ */
+export const getMasterDataByBatchIds = async (req: Request, res: Response) => {
+  try {
+    const batchIds = req.query.batchIds as string;
+    if (!batchIds) {
+      return res.status(400).json({ error: 'batchIds parameter is required' });
+    }
+
+    // Support comma-separated batch IDs for multi-batch selection
+    const batchIdArray = batchIds.split(',').map(id => id.trim()).filter(Boolean);
+
+    if (batchIdArray.length === 0) {
+      return res.status(400).json({ error: 'At least one batch ID is required' });
+    }
+
+    // Build parameterized query for multiple batch IDs
+    const placeholders = batchIdArray.map((_, i) => `$${i + 1}`).join(', ');
+
+    const result = await query(
+      `SELECT wsn, wid, fsn, order_id, product_title, brand, mrp, fsp, 
+              hsn_sac, igst_rate, cms_vertical, fkt_link, p_type, p_size, 
+              vrp, yield_value, fk_grade, fkqc_remark, batch_id
+       FROM master_data
+       WHERE batch_id IN (${placeholders})
+       ORDER BY id`,
+      batchIdArray
+    );
+
+    res.json({
+      data: result.rows,
+      batchIds: batchIdArray,
+      count: result.rows.length
+    });
+  } catch (error: any) {
+    console.error('❌ Get master data by batch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Get master data in batches for frontend cache sync
+ * Returns paginated data optimized for bulk caching
+ */
+export const getMasterDataBatch = async (req: Request, res: Response) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string) || 5000, 10000); // Cap at 10000 per request
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT wsn, wid, fsn, order_id, product_title, brand, mrp, fsp, 
+              hsn_sac, igst_rate, cms_vertical, fkt_link, p_type, p_size, 
+              vrp, yield_value, fk_grade, fkqc_remark
+       FROM master_data
+       ORDER BY id
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    res.json({
+      data: result.rows,
+      page,
+      limit,
+      count: result.rows.length
+    });
+  } catch (error: any) {
+    console.error('❌ Get master data batch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ====== END CACHE APIs ======
+
 export const getMasterData = async (req: Request, res: Response) => {
   try {
     const { page = 1, limit = 100, search = '', batch_id = '', status = '', brand = '', category = '' } = req.query;
@@ -987,12 +1112,165 @@ export const getActiveUploads = async (req: Request, res: Response) => {
   }
 };
 
+// ✅ Create single master data record
+export const createMasterData = async (req: Request, res: Response) => {
+  try {
+    const {
+      wsn, wid, fsn, order_id, fkqc_remark, fk_grade, product_title,
+      hsn_sac, igst_rate, fsp, mrp, invoice_date, fkt_link,
+      wh_location, brand, cms_vertical, vrp, yield_value, p_type, p_size
+    } = req.body;
+
+    // Validate required field
+    if (!wsn || String(wsn).trim() === '') {
+      return res.status(400).json({ error: 'WSN is required' });
+    }
+
+    // Check if WSN already exists
+    const existing = await query('SELECT id FROM master_data WHERE wsn = $1', [wsn.trim()]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: `WSN "${wsn}" already exists in master data` });
+    }
+
+    // Generate batch ID for single entries
+    const batchId = generateBatchId('SINGLE');
+
+    const result = await query(
+      `INSERT INTO master_data (
+        wsn, wid, fsn, order_id, fkqc_remark, fk_grade, product_title,
+        hsn_sac, igst_rate, fsp, mrp, invoice_date, fkt_link,
+        wh_location, brand, cms_vertical, vrp, yield_value, p_type, p_size, batch_id, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
+      RETURNING *`,
+      [
+        wsn?.trim() || null,
+        wid?.trim() || null,
+        fsn?.trim() || null,
+        order_id?.trim() || null,
+        fkqc_remark?.trim() || null,
+        fk_grade?.trim() || null,
+        product_title?.trim() || null,
+        hsn_sac?.trim() || null,
+        igst_rate?.trim() || null,
+        fsp?.trim() || null,
+        mrp?.trim() || null,
+        invoice_date?.trim() || null,
+        fkt_link?.trim() || null,
+        wh_location?.trim() || null,
+        brand?.trim() || null,
+        cms_vertical?.trim() || null,
+        vrp?.trim() || null,
+        yield_value?.trim() || null,
+        p_type?.trim() || null,
+        p_size?.trim() || null,
+        batchId
+      ]
+    );
+
+    console.log(`✅ Created master data: WSN=${wsn}, Batch=${batchId}`);
+    res.status(201).json({ message: 'Product created successfully', data: result.rows[0] });
+  } catch (error: any) {
+    console.error('❌ Create master data error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ✅ Update master data record
+export const updateMasterData = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      wsn, wid, fsn, order_id, fkqc_remark, fk_grade, product_title,
+      hsn_sac, igst_rate, fsp, mrp, invoice_date, fkt_link,
+      wh_location, brand, cms_vertical, vrp, yield_value, p_type, p_size
+    } = req.body;
+
+    // Check if record exists
+    const existing = await query('SELECT id, wsn FROM master_data WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    // If WSN is being changed, check for duplicates
+    if (wsn && wsn.trim() !== existing.rows[0].wsn) {
+      const duplicate = await query('SELECT id FROM master_data WHERE wsn = $1 AND id != $2', [wsn.trim(), id]);
+      if (duplicate.rows.length > 0) {
+        return res.status(400).json({ error: `WSN "${wsn}" already exists in another record` });
+      }
+    }
+
+    const result = await query(
+      `UPDATE master_data SET
+        wsn = COALESCE($1, wsn),
+        wid = $2,
+        fsn = $3,
+        order_id = $4,
+        fkqc_remark = $5,
+        fk_grade = $6,
+        product_title = $7,
+        hsn_sac = $8,
+        igst_rate = $9,
+        fsp = $10,
+        mrp = $11,
+        invoice_date = $12,
+        fkt_link = $13,
+        wh_location = $14,
+        brand = $15,
+        cms_vertical = $16,
+        vrp = $17,
+        yield_value = $18,
+        p_type = $19,
+        p_size = $20
+      WHERE id = $21
+      RETURNING *`,
+      [
+        wsn?.trim() || null,
+        wid?.trim() || null,
+        fsn?.trim() || null,
+        order_id?.trim() || null,
+        fkqc_remark?.trim() || null,
+        fk_grade?.trim() || null,
+        product_title?.trim() || null,
+        hsn_sac?.trim() || null,
+        igst_rate?.trim() || null,
+        fsp?.trim() || null,
+        mrp?.trim() || null,
+        invoice_date?.trim() || null,
+        fkt_link?.trim() || null,
+        wh_location?.trim() || null,
+        brand?.trim() || null,
+        cms_vertical?.trim() || null,
+        vrp?.trim() || null,
+        yield_value?.trim() || null,
+        p_type?.trim() || null,
+        p_size?.trim() || null,
+        id
+      ]
+    );
+
+    console.log(`✅ Updated master data: ID=${id}, WSN=${wsn}`);
+    res.json({ message: 'Product updated successfully', data: result.rows[0] });
+  } catch (error: any) {
+    console.error('❌ Update master data error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 export const deleteMasterData = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+
+    // Check if record exists first
+    const existing = await query('SELECT wsn FROM master_data WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
     await query('DELETE FROM master_data WHERE id = $1', [id]);
-    res.json({ message: 'Deleted' });
+    console.log(`✅ Deleted master data: ID=${id}, WSN=${existing.rows[0].wsn}`);
+    res.json({ message: 'Deleted successfully' });
   } catch (error: any) {
+    console.error('❌ Delete master data error:', error);
     res.status(500).json({ error: error.message });
   }
 };
