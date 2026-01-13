@@ -13,7 +13,7 @@ router.use(hasRole('super_admin'));
 router.get('/', async (req, res) => {
     try {
         const result = await query(
-            `SELECT id, message, endpoint, username, created_at 
+            `SELECT id, message, endpoint, method, username, stack_trace, created_at 
              FROM error_logs 
              ORDER BY created_at DESC 
              LIMIT 100`
