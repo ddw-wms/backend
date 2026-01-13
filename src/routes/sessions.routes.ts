@@ -64,7 +64,7 @@ router.get('/online-users', authMiddleware, hasRole('super_admin', 'admin'), asy
       WHERE is_active = true AND expires_at > NOW()
     `);
 
-        res.json({ userIds: result.rows.map(r => r.user_id) });
+        res.json({ userIds: result.rows.map((r: { user_id: number }) => r.user_id) });
     } catch (error: any) {
         logger.error('Error fetching online users', error);
         res.status(500).json({ error: 'Failed to fetch online users' });
