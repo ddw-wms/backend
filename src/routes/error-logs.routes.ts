@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
              ORDER BY created_at DESC 
              LIMIT 100`
         );
-        res.json(result.rows);
+        res.json({ logs: result.rows });
     } catch (error: any) {
         res.status(500).json({ error: 'Failed to fetch logs' });
     }
