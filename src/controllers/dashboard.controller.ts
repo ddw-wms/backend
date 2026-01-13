@@ -2,7 +2,7 @@
 import { Request, Response } from 'express';
 import { query } from '../config/database';
 
-// Get complete inventory pipeline with all stages
+// Get complete inventory pipeline with all stages - OPTIMIZED for 1M+ rows
 export const getInventoryPipeline = async (req: Request, res: Response) => {
   try {
     const { warehouseId, page = 1, limit = 50, search, stage, availableOnly, brand, category, dateFrom, dateTo } = req.query;
@@ -12,151 +12,170 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
     }
 
     const offset = (Number(page) - 1) * Number(limit);
+
+    // Determine which JOINs are actually needed
+    const needsMasterJoin = Boolean(search || brand || category);
+    const needsStageJoins = Boolean(stage && stage !== 'all') || availableOnly === 'true';
+
     const conditions: string[] = ["i.warehouse_id = $1"];
+    const countConditions: string[] = ["i.warehouse_id = $1"];
     const params: any[] = [warehouseId];
+    const countParams: any[] = [warehouseId];
     let paramIndex = 2;
+    let countParamIndex = 2;
 
     /* 🔎 SEARCH */
     if (search) {
       conditions.push(`(i.wsn ILIKE $${paramIndex} OR m.product_title ILIKE $${paramIndex})`);
+      countConditions.push(`(i.wsn ILIKE $${countParamIndex} OR m.product_title ILIKE $${countParamIndex})`);
       params.push(`%${search}%`);
+      countParams.push(`%${search}%`);
       paramIndex++;
-    }
-
-    /* 📦 AVAILABLE ONLY - Items that are NOT dispatched yet (exclude only dispatched records) */
-    if (availableOnly === 'true') {
-      conditions.push(`NOT EXISTS (SELECT 1 FROM outbound WHERE outbound.wsn = i.wsn AND outbound.warehouse_id = i.warehouse_id AND outbound.dispatch_date IS NOT NULL)`);
+      countParamIndex++;
     }
 
     /* 🏷 BRAND */
     if (brand) {
       conditions.push(`m.brand = $${paramIndex}`);
+      countConditions.push(`m.brand = $${countParamIndex}`);
       params.push(brand);
+      countParams.push(brand);
       paramIndex++;
+      countParamIndex++;
     }
 
     /* 📂 CATEGORY */
     if (category) {
       conditions.push(`m.cms_vertical = $${paramIndex}`);
+      countConditions.push(`m.cms_vertical = $${countParamIndex}`);
       params.push(category);
+      countParams.push(category);
       paramIndex++;
-    }
-
-    /* 🔥 STAGE FILTER - simplified to match app workflow */
-    if (stage && stage !== "all") {
-      if (stage === 'inbound') {
-        // Explicitly include all inbounded items (all stages) when 'inbound' is selected
-        conditions.push(`(
-          CASE
-            WHEN o.id IS NOT NULL AND o.dispatch_date IS NOT NULL THEN 'DISPATCHED'
-            WHEN p.id IS NOT NULL THEN 'PICKING'
-            WHEN q.id IS NOT NULL AND q.qc_grade IS NOT NULL THEN 'QC_DONE'
-            ELSE 'INBOUND'
-          END
-        ) IN ('INBOUND','QC_DONE','PICKING','DISPATCHED')`);
-      } else if (stage === 'qc') {
-        // QC Done: any item that has a QC grade recorded
-        conditions.push(`q.qc_grade IS NOT NULL`);
-      } else if (stage === 'picking') {
-        conditions.push(`p.id IS NOT NULL`);
-      } else if (stage === 'dispatched') {
-        conditions.push(`o.dispatch_date IS NOT NULL`);
-      }
+      countParamIndex++;
     }
 
     /* 📅 DATE FILTERS */
     if (dateFrom && dateTo) {
-      conditions.push(`i.inbound_date::text BETWEEN $${paramIndex} AND $${paramIndex + 1}`);
+      conditions.push(`i.inbound_date BETWEEN $${paramIndex}::date AND $${paramIndex + 1}::date`);
+      countConditions.push(`i.inbound_date BETWEEN $${countParamIndex}::date AND $${countParamIndex + 1}::date`);
       params.push(dateFrom, dateTo);
+      countParams.push(dateFrom, dateTo);
       paramIndex += 2;
+      countParamIndex += 2;
     } else if (dateFrom) {
-      conditions.push(`i.inbound_date::text >= $${paramIndex}`);
+      conditions.push(`i.inbound_date >= $${paramIndex}::date`);
+      countConditions.push(`i.inbound_date >= $${countParamIndex}::date`);
       params.push(dateFrom);
-      paramIndex += 1;
+      countParams.push(dateFrom);
+      paramIndex++;
+      countParamIndex++;
     } else if (dateTo) {
-      conditions.push(`i.inbound_date::text <= $${paramIndex}`);
+      conditions.push(`i.inbound_date <= $${paramIndex}::date`);
+      countConditions.push(`i.inbound_date <= $${countParamIndex}::date`);
       params.push(dateTo);
-      paramIndex += 1;
+      countParams.push(dateTo);
+      paramIndex++;
+      countParamIndex++;
     }
 
+    /* 📦 AVAILABLE ONLY */
+    if (availableOnly === 'true') {
+      conditions.push(`NOT EXISTS (SELECT 1 FROM outbound WHERE outbound.wsn = i.wsn AND outbound.warehouse_id = i.warehouse_id AND outbound.dispatch_date IS NOT NULL)`);
+      countConditions.push(`NOT EXISTS (SELECT 1 FROM outbound WHERE outbound.wsn = i.wsn AND outbound.warehouse_id = i.warehouse_id AND outbound.dispatch_date IS NOT NULL)`);
+    }
 
+    /* 🔥 STAGE FILTER */
+    let stageCondition = '';
+    if (stage && stage !== "all") {
+      if (stage === 'inbound') {
+        // All items (no additional filter needed)
+      } else if (stage === 'qc') {
+        stageCondition = `AND EXISTS (SELECT 1 FROM qc WHERE qc.wsn = i.wsn AND qc.warehouse_id = i.warehouse_id AND qc.qc_grade IS NOT NULL)`;
+      } else if (stage === 'picking') {
+        stageCondition = `AND EXISTS (SELECT 1 FROM picking WHERE picking.wsn = i.wsn AND picking.warehouse_id = i.warehouse_id)`;
+      } else if (stage === 'dispatched') {
+        stageCondition = `AND EXISTS (SELECT 1 FROM outbound WHERE outbound.wsn = i.wsn AND outbound.warehouse_id = i.warehouse_id AND outbound.dispatch_date IS NOT NULL)`;
+      }
+    }
 
     const whereClause = conditions.join(" AND ");
+    const countWhereClause = countConditions.join(" AND ");
 
-    /* COUNT QUERY */
-    const countSql = `
-      SELECT COUNT(*)
-      FROM inbound i
-      LEFT JOIN master_data m ON m.wsn = i.wsn
-      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
-      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
-      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
-      WHERE ${whereClause}
-    `;
-
-    const countResult = await query(countSql, params);
+    /* OPTIMIZED COUNT QUERY - minimal JOINs */
+    let countSql = '';
+    if (needsMasterJoin) {
+      countSql = `
+        SELECT COUNT(*)
+        FROM inbound i
+        LEFT JOIN master_data m ON m.wsn = i.wsn
+        WHERE ${countWhereClause} ${stageCondition}
+      `;
+    } else {
+      countSql = `
+        SELECT COUNT(*)
+        FROM inbound i
+        WHERE ${countWhereClause} ${stageCondition}
+      `;
+    }
+    const countResult = await query(countSql, countParams);
     const total = Number(countResult.rows[0].count);
 
-    /* MAIN DATA QUERY */
+    /* PHASE 1: Get IDs only (fast) */
+    let idsSql = `
+      SELECT i.id
+      FROM inbound i
+      ${needsMasterJoin ? 'LEFT JOIN master_data m ON m.wsn = i.wsn' : ''}
+      WHERE ${whereClause} ${stageCondition}
+      ORDER BY i.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+    params.push(Number(limit), offset);
+    const idsResult = await query(idsSql, params);
+    const ids = idsResult.rows.map((r: any) => r.id);
+
+    if (ids.length === 0) {
+      return res.json({
+        data: [],
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total,
+          totalPages: Math.ceil(total / Number(limit)),
+        },
+      });
+    }
+
+    /* PHASE 2: Fetch full data for IDs */
     const sql = `
       SELECT
         i.id AS inbound_id,
         i.wsn,
-        m.wid,
-        m.fsn,
-        m.order_id,
-        m.product_title,
-        m.brand,
-        m.cms_vertical,
-        m.mrp,
-        m.fsp,
-        i.inbound_date,
-        'INBOUND_RECEIVED' AS inbound_status,
-        i.rack_no,
-        m.wh_location AS warehouse_location,
-        m.hsn_sac,
-        m.igst_rate,
-        m.invoice_date,
-        m.fkt_link,
-        m.p_type,
-        m.p_size,
-        m.vrp,
-        m.yield_value,
-        m.fkqc_remark,
-        m.fk_grade,
-        q.id AS qc_id,
-        q.qc_date,
+        m.wid, m.fsn, m.order_id, m.product_title, m.brand, m.cms_vertical,
+        m.mrp, m.fsp, i.inbound_date, 'INBOUND_RECEIVED' AS inbound_status,
+        i.rack_no, m.wh_location AS warehouse_location, m.hsn_sac, m.igst_rate,
+        m.invoice_date, m.fkt_link, m.p_type, m.p_size, m.vrp, m.yield_value,
+        m.fkqc_remark, m.fk_grade,
+        q.id AS qc_id, q.qc_date,
         CASE WHEN q.id IS NOT NULL THEN 'DONE' ELSE 'Pending' END AS qc_status,
-        p.id AS picking_id,
-        p.picking_date,
+        p.id AS picking_id, p.picking_date,
         COALESCE(p.picking_remarks, 'Pending') AS picking_status,
-        o.id AS outbound_id,
-        o.dispatch_date AS outbound_date,
-        COALESCE(o.dispatch_remarks, 'Pending') AS outbound_status,
-        o.vehicle_no,
-
-        /* ⭐ Stage logic aligned to workflow */
+        o.id AS outbound_id, o.dispatch_date AS outbound_date,
+        COALESCE(o.dispatch_remarks, 'Pending') AS outbound_status, o.vehicle_no,
         CASE
           WHEN o.id IS NOT NULL AND o.dispatch_date IS NOT NULL THEN 'DISPATCHED'
           WHEN p.id IS NOT NULL THEN 'PICKING'
           WHEN q.id IS NOT NULL AND q.qc_grade IS NOT NULL THEN 'QC_DONE'
           ELSE 'INBOUND'
         END AS current_stage
-
-        FROM inbound i
-        LEFT JOIN master_data m ON m.wsn = i.wsn
-        LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
-        LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
-        LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
-
-      WHERE ${whereClause}
+      FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
+      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
+      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
+      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+      WHERE i.id = ANY($1)
       ORDER BY i.created_at DESC
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-
-    params.push(Number(limit), offset);
-
-    const result = await query(sql, params);
+    const result = await query(sql, [ids]);
 
     return res.json({
       data: result.rows,

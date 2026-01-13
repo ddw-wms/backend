@@ -690,11 +690,9 @@ export const bulkUpload = async (req: Request, res: Response) => {
   }
 };
 
-// ====== GET OUTBOUND LIST ======
+// ====== GET OUTBOUND LIST - OPTIMIZED for 1M+ rows ======
 export const getList = async (req: Request, res: Response) => {
   try {
-    //console.log('📋 getList called with params:', req.query);
-
     const {
       page = 1,
       limit = 100,
@@ -710,124 +708,171 @@ export const getList = async (req: Request, res: Response) => {
     } = req.query;
 
     const offset = (Number(page) - 1) * Number(limit);
+
+    // Determine if we need master_data join
+    const needsMasterJoin = Boolean(
+      (search && search !== '') ||
+      (brand && brand !== '') ||
+      (category && category !== '')
+    );
+
     let whereConditions: string[] = [];
+    let countWhereConditions: string[] = [];
     const params: any[] = [];
+    const countParams: any[] = [];
     let paramIndex = 1;
+    let countParamIndex = 1;
 
     if (warehouseId) {
       whereConditions.push(`o.warehouse_id = $${paramIndex}`);
+      countWhereConditions.push(`o.warehouse_id = $${countParamIndex}`);
       params.push(warehouseId);
+      countParams.push(warehouseId);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (search) {
-      // Broaden search to include master_data columns so typing any product/brand/wsn/order will match
       whereConditions.push(`(
         o.wsn ILIKE $${paramIndex} OR
         o.customer_name ILIKE $${paramIndex} OR
         o.vehicle_no ILIKE $${paramIndex} OR
-        o.batch_id ILIKE $${paramIndex} OR
         m.product_title ILIKE $${paramIndex} OR
-        m.brand ILIKE $${paramIndex} OR
-        m.cms_vertical ILIKE $${paramIndex} OR
-        m.fsn ILIKE $${paramIndex} OR
-        m.order_id ILIKE $${paramIndex}
+        m.brand ILIKE $${paramIndex}
+      )`);
+      countWhereConditions.push(`(
+        o.wsn ILIKE $${countParamIndex} OR
+        o.customer_name ILIKE $${countParamIndex} OR
+        o.vehicle_no ILIKE $${countParamIndex} OR
+        m.product_title ILIKE $${countParamIndex} OR
+        m.brand ILIKE $${countParamIndex}
       )`);
       params.push(`%${search}%`);
+      countParams.push(`%${search}%`);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (source) {
       whereConditions.push(`o.source = $${paramIndex}`);
+      countWhereConditions.push(`o.source = $${countParamIndex}`);
       params.push(source);
+      countParams.push(source);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (customer) {
       whereConditions.push(`o.customer_name ILIKE $${paramIndex}`);
+      countWhereConditions.push(`o.customer_name ILIKE $${countParamIndex}`);
       params.push(`%${customer}%`);
+      countParams.push(`%${customer}%`);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (startDate) {
       whereConditions.push(`o.dispatch_date >= $${paramIndex}`);
+      countWhereConditions.push(`o.dispatch_date >= $${countParamIndex}`);
       params.push(startDate);
+      countParams.push(startDate);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (endDate) {
       whereConditions.push(`o.dispatch_date <= $${paramIndex}`);
+      countWhereConditions.push(`o.dispatch_date <= $${countParamIndex}`);
       params.push(endDate);
+      countParams.push(endDate);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (batchId) {
       whereConditions.push(`o.batch_id = $${paramIndex}`);
+      countWhereConditions.push(`o.batch_id = $${countParamIndex}`);
       params.push(batchId);
+      countParams.push(batchId);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (brand) {
       whereConditions.push(`m.brand ILIKE $${paramIndex}`);
+      countWhereConditions.push(`m.brand ILIKE $${countParamIndex}`);
       params.push(`%${brand}%`);
+      countParams.push(`%${brand}%`);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (category) {
       whereConditions.push(`m.cms_vertical ILIKE $${paramIndex}`);
+      countWhereConditions.push(`m.cms_vertical ILIKE $${countParamIndex}`);
       params.push(`%${category}%`);
+      countParams.push(`%${category}%`);
       paramIndex++;
+      countParamIndex++;
     }
 
     const whereClause = whereConditions.length > 0
       ? `WHERE ${whereConditions.join(' AND ')}`
       : '';
+    const countWhereClause = countWhereConditions.length > 0
+      ? `WHERE ${countWhereConditions.join(' AND ')}`
+      : '';
 
-    //console.log('📊 SQL params:', params);
-    //console.log('📊 WHERE clause:', whereClause);
+    // OPTIMIZED: Fast count - avoid JOIN when not needed
+    let total = 0;
+    if (needsMasterJoin) {
+      const countSql = `SELECT COUNT(*) as total FROM outbound o LEFT JOIN master_data m ON o.wsn = m.wsn ${countWhereClause}`;
+      const countResult = await query(countSql, countParams);
+      total = parseInt(countResult.rows[0].total);
+    } else {
+      const countSql = `SELECT COUNT(*) as total FROM outbound o ${countWhereClause}`;
+      const countResult = await query(countSql, countParams);
+      total = parseInt(countResult.rows[0].total);
+    }
 
-    const countSql = `
-      SELECT COUNT(*) as total 
-      FROM outbound o 
-      LEFT JOIN master_data m ON o.wsn = m.wsn
+    // PHASE 1: Get IDs only (fast with index on id DESC)
+    const idsSql = `
+      SELECT o.id
+      FROM outbound o
+      ${needsMasterJoin ? 'LEFT JOIN master_data m ON o.wsn = m.wsn' : ''}
       ${whereClause}
+      ORDER BY o.id DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    const countResult = await query(countSql, params);
-    const total = parseInt(countResult.rows[0].total);
+    params.push(Number(limit), offset);
+    const idsResult = await query(idsSql, params);
+    const ids = idsResult.rows.map((r: any) => r.id);
 
+    // If no results, return empty
+    if (ids.length === 0) {
+      return res.json({
+        data: [],
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        totalPages: Math.ceil(total / Number(limit))
+      });
+    }
+
+    // PHASE 2: Fetch full data for the IDs
     const dataSql = `
       SELECT 
         o.*,
-        m.product_title,
-        m.brand,
-        m.cms_vertical,
-        m.wid,
-        m.fsn,
-        m.order_id,
-        m.fkqc_remark,
-        m.fk_grade,
-        m.hsn_sac,
-        m.igst_rate,
-        m.fsp,
-        m.mrp,
-        m.vrp,
-        m.yield_value,
-        m.invoice_date,
-        m.fkt_link,
-        m.wh_location,
-        m.p_type,
-        m.p_size
+        m.product_title, m.brand, m.cms_vertical, m.wid, m.fsn, m.order_id,
+        m.fkqc_remark, m.fk_grade, m.hsn_sac, m.igst_rate, m.fsp, m.mrp,
+        m.vrp, m.yield_value, m.invoice_date, m.fkt_link, m.wh_location,
+        m.p_type, m.p_size
       FROM outbound o
       LEFT JOIN master_data m ON o.wsn = m.wsn
-      ${whereClause}
+      WHERE o.id = ANY($1)
       ORDER BY o.id DESC
-      LIMIT ${limit} OFFSET ${offset}
     `;
-
-    // console.log('📊 Final SQL:', dataSql);
-    // console.log('📊 Limit:', limit, 'Offset:', offset);
-
-    const result = await query(dataSql, params);
+    const result = await query(dataSql, [ids]);
 
     res.json({
       data: result.rows,
@@ -838,8 +883,6 @@ export const getList = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('❌ Get outbound list error:', error);
-    console.error('❌ Error details:', error.message);
-    console.error('❌ Stack:', error.stack);
     res.status(500).json({ error: error.message });
   }
 };

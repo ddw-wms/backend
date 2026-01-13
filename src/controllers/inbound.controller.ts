@@ -714,7 +714,7 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
 };
 
 
-// GET INBOUND LIST - with master_data LEFT JOIN
+// GET INBOUND LIST - OPTIMIZED with conditional master_data JOIN
 export const getInboundList = async (req: Request, res: Response) => {
   try {
     const {
@@ -731,15 +731,28 @@ export const getInboundList = async (req: Request, res: Response) => {
 
     const offset = (Number(page) - 1) * Number(limit);
 
-    let whereConditions: string[] = [];
-    const params: any[] = [];
-    let paramIndex = 1;
+    // Determine if we need master_data join (only for search/brand/category filters)
+    const needsMasterJoin = Boolean(
+      (search && search !== '') ||
+      (brand && brand !== '') ||
+      (category && category !== '')
+    );
 
-    // Warehouse filter
+    let whereConditions: string[] = [];
+    let countWhereConditions: string[] = [];
+    const params: any[] = [];
+    const countParams: any[] = [];
+    let paramIndex = 1;
+    let countParamIndex = 1;
+
+    // Warehouse filter (always applied)
     if (warehouseId) {
       whereConditions.push(`i.warehouse_id = $${paramIndex}`);
+      countWhereConditions.push(`i.warehouse_id = $${countParamIndex}`);
       params.push(warehouseId);
+      countParams.push(warehouseId);
       paramIndex++;
+      countParamIndex++;
     }
 
     // Search filter (WSN or product title)
@@ -747,8 +760,13 @@ export const getInboundList = async (req: Request, res: Response) => {
       whereConditions.push(
         `(i.wsn ILIKE $${paramIndex} OR m.product_title ILIKE $${paramIndex})`
       );
+      countWhereConditions.push(
+        `(i.wsn ILIKE $${countParamIndex} OR m.product_title ILIKE $${countParamIndex})`
+      );
       params.push(`%${search}%`);
+      countParams.push(`%${search}%`);
       paramIndex++;
+      countParamIndex++;
     }
 
     // Date range filter
@@ -756,55 +774,109 @@ export const getInboundList = async (req: Request, res: Response) => {
       whereConditions.push(
         `i.inbound_date >= $${paramIndex}::date AND i.inbound_date <= $${paramIndex + 1}::date`
       );
-      params.push(dateFrom);
-      params.push(dateTo);
+      countWhereConditions.push(
+        `i.inbound_date >= $${countParamIndex}::date AND i.inbound_date <= $${countParamIndex + 1}::date`
+      );
+      params.push(dateFrom, dateTo);
+      countParams.push(dateFrom, dateTo);
       paramIndex += 2;
+      countParamIndex += 2;
     } else if (dateFrom) {
       whereConditions.push(`i.inbound_date >= $${paramIndex}::date`);
+      countWhereConditions.push(`i.inbound_date >= $${countParamIndex}::date`);
       params.push(dateFrom);
+      countParams.push(dateFrom);
       paramIndex++;
+      countParamIndex++;
     } else if (dateTo) {
       whereConditions.push(`i.inbound_date <= $${paramIndex}::date`);
+      countWhereConditions.push(`i.inbound_date <= $${countParamIndex}::date`);
       params.push(dateTo);
+      countParams.push(dateTo);
       paramIndex++;
+      countParamIndex++;
     }
-
 
     // Brand filter - from master_data
     if (brand && brand !== '') {
       whereConditions.push(`m.brand = $${paramIndex}`);
+      countWhereConditions.push(`m.brand = $${countParamIndex}`);
       params.push(brand);
+      countParams.push(brand);
       paramIndex++;
+      countParamIndex++;
     }
 
     // Category filter - from master_data
     if (category && category !== '') {
       whereConditions.push(`m.cms_vertical = $${paramIndex}`);
+      countWhereConditions.push(`m.cms_vertical = $${countParamIndex}`);
       params.push(category);
+      countParams.push(category);
       paramIndex++;
+      countParamIndex++;
     }
 
     // Batch ID filter
     if (batchId && batchId !== '') {
       whereConditions.push(`i.batch_id = $${paramIndex}`);
+      countWhereConditions.push(`i.batch_id = $${countParamIndex}`);
       params.push(batchId);
+      countParams.push(batchId);
       paramIndex++;
+      countParamIndex++;
     }
 
     const whereClause =
       whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+    const countWhereClause =
+      countWhereConditions.length > 0 ? 'WHERE ' + countWhereConditions.join(' AND ') : '';
 
-    // Get total count
-    const countSql = `
-      SELECT COUNT(*)
+    // OPTIMIZED: Get count - use simple count when no master_data filters
+    let total = 0;
+    if (needsMasterJoin) {
+      const countSql = `
+        SELECT COUNT(*)
+        FROM inbound i
+        LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+        ${countWhereClause}
+      `;
+      const countResult = await query(countSql, countParams);
+      total = parseInt(countResult.rows[0].count);
+    } else {
+      // Fast count without JOIN when no master_data filters needed
+      const countSql = `SELECT COUNT(*) FROM inbound i ${countWhereClause}`;
+      const countResult = await query(countSql, countParams);
+      total = parseInt(countResult.rows[0].count);
+    }
+
+    // OPTIMIZED: Two-phase query - first get IDs with pagination, then enrich with master_data
+    // This is much faster than JOIN + LIMIT/OFFSET on large tables
+    const idsSql = `
+      SELECT i.id
       FROM inbound i
-      LEFT JOIN master_data m ON i.wsn = m.wsn
+      ${needsMasterJoin ? 'LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)' : ''}
       ${whereClause}
+      ORDER BY i.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    const countResult = await query(countSql, params);
-    const total = parseInt(countResult.rows[0].count);
+    params.push(Number(limit), offset);
 
-    // Get paginated data with master_data join
+    const idsResult = await query(idsSql, params);
+    const ids = idsResult.rows.map((r: any) => r.id);
+
+    // If no results, return empty
+    if (ids.length === 0) {
+      return res.json({
+        data: [],
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        totalPages: Math.ceil(total / Number(limit)),
+      });
+    }
+
+    // Fetch full data for the IDs with master_data join
     const dataSql = `
       SELECT 
         i.id,
@@ -819,6 +891,7 @@ export const getInboundList = async (req: Request, res: Response) => {
         i.warehouse_id,
         i.warehouse_name,        
         i.created_user_name,
+        i.created_at,
         -- Master data fields
         m.wid,
         m.fsn,
@@ -840,15 +913,11 @@ export const getInboundList = async (req: Request, res: Response) => {
         m.fk_grade
       FROM inbound i
       LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
-      ${whereClause}
+      WHERE i.id = ANY($1)
       ORDER BY i.created_at DESC
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
-    params.push(Number(limit));
-    params.push(offset);
-
-    const result = await query(dataSql, params);
+    const result = await query(dataSql, [ids]);
 
     res.json({
       data: result.rows,

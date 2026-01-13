@@ -88,7 +88,7 @@ export const getPendingInboundForQC = async (req: Request, res: Response) => {
   }
 };
 
-// ✅ GET QC LIST
+// ✅ GET QC LIST - OPTIMIZED for 1M+ rows
 export const getQCList = async (req: Request, res: Response) => {
   try {
     const {
@@ -104,133 +104,160 @@ export const getQCList = async (req: Request, res: Response) => {
       category,
     } = req.query;
 
-
     const offset = (Number(page) - 1) * Number(limit);
+
+    // Determine if we need master_data join for filtering
+    const needsMasterJoin = Boolean(
+      (search && search !== '') ||
+      (brand && brand !== '') ||
+      (category && category !== '')
+    );
+
     let whereConditions: string[] = [];
+    let countWhereConditions: string[] = [];
     const params: any[] = [];
+    const countParams: any[] = [];
     let paramIndex = 1;
+    let countParamIndex = 1;
 
     if (warehouseId) {
       whereConditions.push(`q.warehouse_id = $${paramIndex}`);
+      countWhereConditions.push(`q.warehouse_id = $${countParamIndex}`);
       params.push(warehouseId);
+      countParams.push(warehouseId);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (search && search !== '') {
       whereConditions.push(`(
-    UPPER(q.wsn) LIKE UPPER($${paramIndex}) OR
-    UPPER(m.product_title) LIKE UPPER($${paramIndex}) OR
-    UPPER(m.brand) LIKE UPPER($${paramIndex}) OR
-    UPPER(m.cms_vertical) LIKE UPPER($${paramIndex})
-  )`);
-      params.push(`%${search}%`);  // ✅ PARTIAL MATCH with wildcards
+        q.wsn ILIKE $${paramIndex} OR
+        m.product_title ILIKE $${paramIndex} OR
+        m.brand ILIKE $${paramIndex}
+      )`);
+      countWhereConditions.push(`(
+        q.wsn ILIKE $${countParamIndex} OR
+        m.product_title ILIKE $${countParamIndex} OR
+        m.brand ILIKE $${countParamIndex}
+      )`);
+      params.push(`%${search}%`);
+      countParams.push(`%${search}%`);
       paramIndex++;
+      countParamIndex++;
     }
-
 
     if (qcStatus && qcStatus !== '') {
       whereConditions.push(`q.qc_status = $${paramIndex}`);
+      countWhereConditions.push(`q.qc_status = $${countParamIndex}`);
       params.push(qcStatus);
+      countParams.push(qcStatus);
       paramIndex++;
+      countParamIndex++;
     }
 
-    // ← ADD GRADE FILTER
     if (qcGrade && qcGrade !== '') {
       whereConditions.push(`q.qc_grade = $${paramIndex}`);
+      countWhereConditions.push(`q.qc_grade = $${countParamIndex}`);
       params.push(qcGrade);
+      countParams.push(qcGrade);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (dateFrom) {
       whereConditions.push(`q.qc_date >= $${paramIndex}`);
+      countWhereConditions.push(`q.qc_date >= $${countParamIndex}`);
       params.push(dateFrom);
+      countParams.push(dateFrom);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (dateTo) {
       whereConditions.push(`q.qc_date <= $${paramIndex}`);
+      countWhereConditions.push(`q.qc_date <= $${countParamIndex}`);
       params.push(dateTo);
+      countParams.push(dateTo);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (brand && brand !== '') {
       whereConditions.push(`m.brand = $${paramIndex}`);
+      countWhereConditions.push(`m.brand = $${countParamIndex}`);
       params.push(brand);
+      countParams.push(brand);
       paramIndex++;
+      countParamIndex++;
     }
 
     if (category && category !== '') {
       whereConditions.push(`m.cms_vertical = $${paramIndex}`);
+      countWhereConditions.push(`m.cms_vertical = $${countParamIndex}`);
       params.push(category);
+      countParams.push(category);
       paramIndex++;
+      countParamIndex++;
     }
 
     const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+    const countWhereClause = countWhereConditions.length > 0 ? 'WHERE ' + countWhereConditions.join(' AND ') : '';
 
-    // Count total
-    const countSql = `SELECT COUNT(*) as count FROM qc q LEFT JOIN master_data m ON q.wsn = m.wsn ${whereClause}`;
-    const countResult = await query(countSql, params);
-    const total = parseInt(countResult.rows[0]?.count || '0');
+    // OPTIMIZED: Fast count - avoid JOIN when not needed
+    let total = 0;
+    if (needsMasterJoin) {
+      const countSql = `SELECT COUNT(*) FROM qc q LEFT JOIN master_data m ON q.wsn = m.wsn ${countWhereClause}`;
+      const countResult = await query(countSql, countParams);
+      total = parseInt(countResult.rows[0]?.count || '0');
+    } else {
+      const countSql = `SELECT COUNT(*) FROM qc q ${countWhereClause}`;
+      const countResult = await query(countSql, countParams);
+      total = parseInt(countResult.rows[0]?.count || '0');
+    }
 
-    // Get paginated data
-    const dataSql = `
-      SELECT
-  -- ================= QC =================
-  q.id,
-  q.wsn,
-  q.qc_date,
-  q.qc_by,
-  q.qc_by_name,
-  q.qc_grade,
-  q.qc_status,
-  q.qc_remarks,
-  q.other_remarks,
-  q.product_serial_number,
-  q.rack_no,
-  q.batch_id,
-  q.created_at,
-  q.updated_at,
-  q.updated_by_name,
-
-  -- ================= INBOUND =================
-  i.inbound_date,
-  i.vehicle_no,
-  i.rack_no AS inbound_rack_no,
-
-  -- ================= MASTER DATA (ALL) =================
-  m.wid,
-  m.fsn,
-  m.order_id,
-  m.fkqc_remark,
-  m.fk_grade,
-  m.product_title,
-  m.hsn_sac,
-  m.igst_rate,
-  m.fsp,
-  m.mrp,
-  m.invoice_date,
-  m.fkt_link,
-  m.wh_location,
-  m.brand,
-  m.cms_vertical,
-  m.vrp,
-  m.yield_value,
-  m.p_type,
-  m.p_size,
-  m.upload_date,
-  m.batch_id AS master_batch_id,
-  m.created_user_name
-FROM qc q
-LEFT JOIN inbound i ON q.wsn = i.wsn
-LEFT JOIN master_data m ON q.wsn = m.wsn
-
+    // PHASE 1: Get IDs only (fast with index)
+    const idsSql = `
+      SELECT q.id
+      FROM qc q
+      ${needsMasterJoin ? 'LEFT JOIN master_data m ON q.wsn = m.wsn' : ''}
       ${whereClause}
       ORDER BY q.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-
     params.push(Number(limit), offset);
-    const result = await query(dataSql, params);
+    const idsResult = await query(idsSql, params);
+    const ids = idsResult.rows.map((r: any) => r.id);
+
+    // If no results, return empty
+    if (ids.length === 0) {
+      return res.json({
+        data: [],
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        totalPages: Math.ceil(total / Number(limit)),
+      });
+    }
+
+    // PHASE 2: Fetch full data for the IDs
+    const dataSql = `
+      SELECT
+        q.id, q.wsn, q.qc_date, q.qc_by, q.qc_by_name, q.qc_grade, q.qc_status,
+        q.qc_remarks, q.other_remarks, q.product_serial_number, q.rack_no,
+        q.batch_id, q.created_at, q.updated_at, q.updated_by_name,
+        i.inbound_date, i.vehicle_no, i.rack_no AS inbound_rack_no,
+        m.wid, m.fsn, m.order_id, m.fkqc_remark, m.fk_grade, m.product_title,
+        m.hsn_sac, m.igst_rate, m.fsp, m.mrp, m.invoice_date, m.fkt_link,
+        m.wh_location, m.brand, m.cms_vertical, m.vrp, m.yield_value,
+        m.p_type, m.p_size, m.upload_date, m.batch_id AS master_batch_id,
+        m.created_user_name
+      FROM qc q
+      LEFT JOIN inbound i ON q.wsn = i.wsn AND q.warehouse_id = i.warehouse_id
+      LEFT JOIN master_data m ON q.wsn = m.wsn
+      WHERE q.id = ANY($1)
+      ORDER BY q.created_at DESC
+    `;
+    const result = await query(dataSql, [ids]);
 
     res.json({
       data: result.rows,
