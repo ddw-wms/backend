@@ -8,7 +8,7 @@ if (!process.env.JWT_SECRET && process.env.NODE_ENV !== 'test') {
 
 // Use a test secret when running tests; otherwise the presence check above guarantees a value
 const JWT_SECRET: string = process.env.JWT_SECRET ?? (process.env.NODE_ENV === 'test' ? 'test_jwt_secret' : '');
-const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
+const JWT_EXPIRY = process.env.JWT_EXPIRY || '8h'; // 8 hours for security (was 7d)
 
 export interface JWTPayload {
   userId: number;

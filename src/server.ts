@@ -29,6 +29,9 @@ import reportsRoutes from './routes/reports.routes';
 import backupRoutes from './routes/backup.routes';
 import permissionsRoutes from './routes/permissions.routes';
 import uiAccessRoutes from './routes/ui-access.routes';
+import errorLogsRoutes from './routes/error-logs.routes';
+import sessionsRoutes from './routes/sessions.routes';
+import logger from './utils/logger';
 
 import { isDbReady } from "./config/database";
 import { apiTimeout } from './middleware/timeout.middleware';
@@ -40,16 +43,29 @@ const app: Express = express();
 //const PORT = process.env.PORT || 5000;
 const PORT = Number(process.env.PORT) || 3000;
 
+// Parse allowed origins from environment variable or use defaults
+const getAllowedOrigins = (): string[] => {
+  const envOrigins = process.env.CORS_ORIGINS;
+  if (envOrigins) {
+    return envOrigins.split(',').map(origin => origin.trim());
+  }
+  // Default origins for development
+  if (process.env.NODE_ENV === 'production') {
+    return [
+      'https://ddwms.vercel.app',
+      process.env.FRONTEND_URL || ''
+    ].filter(Boolean);
+  }
+  return [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:9100'
+  ];
+};
 
 // CORS (MUST BE FIRST)
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://192.168.1.7:3000',
-    'http://192.168.29.166:3000',
-    'https://ddwms.vercel.app',
-    'http://127.0.0.1:9100'
-  ],
+  origin: getAllowedOrigins(),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -70,8 +86,8 @@ app.use((req, res, next) => {
 // Request timeout (30 seconds for all requests)
 app.use(apiTimeout);
 
-app.use(express.urlencoded({ limit: '1000mb', extended: true }));
-app.use(express.json({ limit: '1000mb' }));
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
+app.use(express.json({ limit: '200mb' }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Serve Print Agent installer (from Cloudflare R2)
@@ -145,6 +161,8 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/backups', backupRoutes);
 app.use('/api/permissions', permissionsRoutes);
 app.use('/api/ui-access', uiAccessRoutes);
+app.use('/api/error-logs', errorLogsRoutes);
+app.use('/api/sessions', sessionsRoutes);
 
 
 
@@ -175,10 +193,10 @@ if (process.env.NODE_ENV !== 'test') {
       await backupScheduler.initialize();
 
       app.listen(PORT, () => {
-        console.log(`✓ Server running on port ${PORT}`);
+        logger.info(`Server running on port ${PORT}`);
       });
     } catch (err) {
-      console.error('❌ Failed to start server:', err);
+      logger.error('Failed to start server', err);
       process.exit(1);
     }
   })();
@@ -186,18 +204,5 @@ if (process.env.NODE_ENV !== 'test') {
   // In test environment, avoid starting DB connection and listener.
   // Tests set NODE_ENV=test and should stub or avoid DB access.
 }
-
-// (async () => {
-//   try {
-//     await initializeDatabase();
-//     app.listen(PORT, "0.0.0.0", () => {
-//       console.log(`✓ Server running on port ${PORT}`);
-//     });
-
-//   } catch (err) {
-//     console.error('❌ Failed to start server:', err);
-//     process.exit(1);
-//   }
-// })();
 
 export default app;

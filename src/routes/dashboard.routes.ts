@@ -1,8 +1,12 @@
 // File Path = warehouse-backend/src/routes/dashboard.routes.ts
 import { Router } from 'express';
 import * as dashboardController from '../controllers/dashboard.controller';
+import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
+
+// All dashboard routes require authentication
+router.use(authMiddleware);
 
 // Get inventory pipeline (Inbound + QC + Picking + Outbound joined)
 router.get('/inventory-pipeline', dashboardController.getInventoryPipeline);

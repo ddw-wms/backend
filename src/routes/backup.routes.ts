@@ -38,15 +38,17 @@ router.get(
     backupController.downloadBackup
 );
 
-// Restore database from backup
+// Restore database from backup (admin only)
 router.post(
     '/restore/:id',
+    hasRole('admin'),
     backupController.restoreBackup
 );
 
-// Delete backup
+// Delete backup (admin only)
 router.delete(
     '/:id',
+    hasRole('admin'),
     backupController.deleteBackup
 );
 

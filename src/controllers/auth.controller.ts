@@ -4,6 +4,13 @@ import { query } from '../config/database';
 import { generateToken } from '../config/auth';
 import { hashPassword, comparePasswords } from '../utils/helpers';
 import { validateEmail, validatePassword, validateUsername } from '../utils/validators';
+import logger from '../utils/logger';
+import crypto from 'crypto';
+
+// Helper to hash token for storage
+const hashToken = (token: string): string => {
+  return crypto.createHash('sha256').update(token).digest('hex');
+};
 
 export const login = async (req: Request, res: Response) => {
   try {
@@ -52,7 +59,7 @@ export const login = async (req: Request, res: Response) => {
       }
     } catch (permError: any) {
       // Permissions tables don't exist - use legacy role-based access
-      console.log('Permission tables not found, using legacy role-based access');
+      logger.debug('Permission tables not found, using legacy role-based access');
       if (user.role === 'admin' || user.role === 'super_admin') {
         permissions = { '__legacy_admin__': { can_access: true, is_visible: true } };
       }
@@ -76,9 +83,9 @@ export const login = async (req: Request, res: Response) => {
 
       // If user has warehouse restrictions, use them
       // If empty, user has access to ALL warehouses (no restriction)
-      console.log(`User ${user.username} warehouse access: ${warehousesList.length > 0 ? warehousesList.map(w => w.warehouse_name).join(', ') : 'ALL (no restrictions)'}`);
+      logger.debug('User warehouse access', { username: user.username, warehouses: warehousesList.length > 0 ? warehousesList.map(w => w.warehouse_name).join(', ') : 'ALL (no restrictions)' });
     } catch (whError: any) {
-      console.log('user_warehouses table not found, using legacy warehouse_id');
+      logger.debug('user_warehouses table not found, using legacy warehouse_id');
       // Fallback to legacy warehouse_id
       if (user.warehouse_id) {
         const whResult = await query('SELECT id, name, code FROM warehouses WHERE id = $1', [user.warehouse_id]);
@@ -101,6 +108,24 @@ export const login = async (req: Request, res: Response) => {
       warehouseId: user.warehouse_id,
     });
 
+    // Create active session for tracking logged-in users
+    try {
+      const tokenHash = hashToken(token);
+      const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 hours (match JWT expiry)
+      const ipAddress = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+      const userAgent = req.headers['user-agent'] || 'unknown';
+
+      await query(`
+        INSERT INTO active_sessions (user_id, token_hash, ip_address, user_agent, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [user.id, tokenHash, ipAddress, userAgent, expiresAt]);
+
+      logger.debug('Session created for user', { username: user.username });
+    } catch (sessionError: any) {
+      // Table might not exist yet - continue without session tracking
+      logger.debug('Session tracking not available (table may not exist)');
+    }
+
     res.json({
       token,
       user: {
@@ -116,8 +141,8 @@ export const login = async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: error.message });
+    logger.error('Login error', error);
+    res.status(500).json({ error: 'Login failed. Please try again.' });
   }
 };
 
@@ -129,8 +154,10 @@ export const register = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid username (3-50 chars required)' });
     }
 
-    if (!validatePassword(password)) {
-      return res.status(400).json({ error: 'Password must be 6+ characters' });
+    // Use new password validation with detailed feedback
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({ error: passwordValidation.message });
     }
 
     if (email && !validateEmail(email)) {
@@ -160,7 +187,6 @@ export const register = async (req: Request, res: Response) => {
       user: result.rows[0],
     });
   } catch (error: any) {
-    console.error('Register error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 };

@@ -5,6 +5,7 @@ import { createJSONBackup } from '../utils/supabaseBackup';
 import { uploadToR2, isR2Configured } from './cloudflareR2';
 import fs from 'fs';
 import path from 'path';
+import logger from '../utils/logger';
 
 const BACKUP_DIR = path.join(__dirname, '../../backups');
 
@@ -29,11 +30,11 @@ class BackupScheduler {
     // Initialize scheduler - load all active schedules
     async initialize() {
         if (this.isInitialized) {
-            console.log('⚠️ Backup scheduler already initialized');
+            logger.warn('Backup scheduler already initialized');
             return;
         }
 
-        console.log('🕐 Initializing backup scheduler...');
+        logger.info('Initializing backup scheduler...');
 
         try {
             // Load all enabled schedules
@@ -49,9 +50,9 @@ class BackupScheduler {
             this.startCleanupJob();
 
             this.isInitialized = true;
-            console.log(`✅ Backup scheduler initialized with ${result.rows.length} active schedule(s)`);
+            logger.info('Backup scheduler initialized', { activeSchedules: result.rows.length });
         } catch (error: any) {
-            console.error('❌ Failed to initialize backup scheduler:', error.message);
+            logger.error('Failed to initialize backup scheduler', error);
         }
     }
 
@@ -87,7 +88,7 @@ class BackupScheduler {
             }
 
             const cronExpression = this.getCronExpression(schedule);
-            console.log(`📅 Scheduling backup "${schedule.name}" with cron: ${cronExpression}`);
+            logger.info('Scheduling backup', { name: schedule.name, cron: cronExpression });
 
             const job = cron.schedule(cronExpression, async () => {
                 await this.executeScheduledBackup(schedule);
@@ -99,13 +100,13 @@ class BackupScheduler {
             this.updateNextRunTime(schedule.id);
 
         } catch (error: any) {
-            console.error(`❌ Failed to schedule backup ${schedule.id}:`, error.message);
+            logger.error('Failed to schedule backup', error, { scheduleId: schedule.id });
         }
     }
 
     // Execute a scheduled backup
     private async executeScheduledBackup(schedule: Schedule) {
-        console.log(`🔄 Executing scheduled backup: ${schedule.name}`);
+        logger.info('Executing scheduled backup', { name: schedule.name });
 
         try {
             // Create JSON backup
@@ -154,13 +155,13 @@ class BackupScheduler {
             // Update next run time
             await this.updateNextRunTime(schedule.id);
 
-            console.log(`✅ Scheduled backup completed: ${schedule.name} (${backupResult.fileSizeMB} MB)`);
+            logger.info('Scheduled backup completed', { name: schedule.name, fileSizeMB: backupResult.fileSizeMB });
 
             // Run retention cleanup for this schedule
             await this.cleanupOldBackups(schedule.retention_days);
 
         } catch (error: any) {
-            console.error(`❌ Scheduled backup failed: ${schedule.name}`, error.message);
+            logger.error('Scheduled backup failed', error, { name: schedule.name });
 
             // Log failure
             await query(
@@ -207,7 +208,7 @@ class BackupScheduler {
                 [nextRun, scheduleId]
             );
         } catch (error) {
-            console.error('Failed to update next run time:', error);
+            logger.error('Failed to update next run time', error as Error);
         }
     }
 
@@ -216,7 +217,7 @@ class BackupScheduler {
         if (this.scheduledJobs.has(scheduleId)) {
             this.scheduledJobs.get(scheduleId)?.stop();
             this.scheduledJobs.delete(scheduleId);
-            console.log(`🛑 Cancelled schedule: ${scheduleId}`);
+            logger.info('Cancelled schedule', { scheduleId });
         }
     }
 
@@ -229,7 +230,7 @@ class BackupScheduler {
             );
 
             if (result.rows.length === 0) {
-                console.error(`Schedule ${scheduleId} not found`);
+                logger.error('Schedule not found', undefined, { scheduleId });
                 return;
             }
 
@@ -243,13 +244,13 @@ class BackupScheduler {
                 this.scheduleBackup(schedule);
             }
         } catch (error: any) {
-            console.error(`Failed to reload schedule ${scheduleId}:`, error.message);
+            logger.error('Failed to reload schedule', error, { scheduleId });
         }
     }
 
     // Reload all schedules
     async reloadAllSchedules() {
-        console.log('🔄 Reloading all backup schedules...');
+        logger.info('Reloading all backup schedules...');
 
         // Cancel all existing jobs
         this.scheduledJobs.forEach((job, id) => {

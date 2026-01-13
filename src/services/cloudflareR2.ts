@@ -1,11 +1,12 @@
 // File Path = warehouse-backend/src/services/cloudflareR2.ts
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import fs from 'fs';
+import logger from '../utils/logger';
 
 // Initialize R2 Client
 const getR2Client = () => {
     if (!process.env.CLOUDFLARE_R2_ACCOUNT_ID || !process.env.CLOUDFLARE_R2_ACCESS_KEY || !process.env.CLOUDFLARE_R2_SECRET_KEY) {
-        console.warn('⚠️ Cloudflare R2 credentials not configured. Backups will be stored locally only.');
+        logger.warn('Cloudflare R2 credentials not configured. Backups will be stored locally only.');
         return null;
     }
 
@@ -24,7 +25,7 @@ export const uploadToR2 = async (filePath: string, fileName: string): Promise<bo
     try {
         const r2Client = getR2Client();
         if (!r2Client) {
-            console.log('📁 R2 not configured, skipping cloud upload');
+            logger.debug('R2 not configured, skipping cloud upload');
             return false;
         }
 
@@ -42,11 +43,11 @@ export const uploadToR2 = async (filePath: string, fileName: string): Promise<bo
         });
 
         await r2Client.send(command);
-        console.log(`✅ Backup uploaded to Cloudflare R2: ${fileName}`);
+        logger.info('Backup uploaded to Cloudflare R2', { fileName });
         return true;
 
     } catch (error: any) {
-        console.error('❌ R2 upload failed:', error.message);
+        logger.error('R2 upload failed', error);
         return false;
     }
 };
@@ -65,11 +66,11 @@ export const deleteFromR2 = async (fileName: string): Promise<boolean> => {
         });
 
         await r2Client.send(command);
-        console.log(`🗑️ Backup deleted from R2: ${fileName}`);
+        logger.info('Backup deleted from R2', { fileName });
         return true;
 
     } catch (error: any) {
-        console.error('❌ R2 delete failed:', error.message);
+        logger.error('R2 delete failed', error);
         return false;
     }
 };
@@ -96,14 +97,14 @@ export const downloadFromR2 = async (fileName: string, destinationPath: string):
             }
             const fileBuffer = Buffer.concat(chunks);
             fs.writeFileSync(destinationPath, fileBuffer);
-            console.log(`⬇️ Backup downloaded from R2: ${fileName}`);
+            logger.info('Backup downloaded from R2', { fileName });
             return true;
         }
 
         return false;
 
     } catch (error: any) {
-        console.error('❌ R2 download failed:', error.message);
+        logger.error('R2 download failed', error);
         return false;
     }
 };

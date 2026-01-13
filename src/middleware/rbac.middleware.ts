@@ -1,6 +1,7 @@
 // File Path = warehouse-backend/src/middleware/rbac.middleware.ts
 import { Request, Response, NextFunction } from 'express';
 import { query } from '../config/database';
+import logger from '../utils/logger';
 
 /**
  * Interface for permission check results
@@ -53,7 +54,7 @@ async function checkWarehouseTablesExist(): Promise<boolean> {
         await query(`SELECT 1 FROM user_warehouses LIMIT 1`);
         warehouseTablesExist = true;
     } catch (error) {
-        console.log('user_warehouses table not found - using legacy warehouse access');
+        logger.debug('user_warehouses table not found - using legacy warehouse access');
         warehouseTablesExist = false;
     }
     return warehouseTablesExist;
@@ -146,7 +147,7 @@ async function getUserWarehouses(userId: number, legacyWarehouseId?: number): Pr
             permissionCache.set(cacheKey, { data: [], expiry: Date.now() + CACHE_TTL });
             return [];
         } catch (error) {
-            console.log('Error querying user_warehouses, falling back to legacy mode');
+            logger.debug('Error querying user_warehouses, falling back to legacy mode');
         }
     }
 
@@ -231,7 +232,7 @@ export const requirePermission = (...permissionCodes: string[]) => {
 
             next();
         } catch (error: any) {
-            console.error('Permission check error:', error);
+            logger.error('Permission check error', error);
             res.status(500).json({ error: 'Permission check failed' });
         }
     };
@@ -283,7 +284,7 @@ export const requireAllPermissions = (...permissionCodes: string[]) => {
 
             next();
         } catch (error: any) {
-            console.error('Permission check error:', error);
+            logger.error('Permission check error', error);
             res.status(500).json({ error: 'Permission check failed' });
         }
     };
@@ -342,7 +343,7 @@ export const requireWarehouseAccess = async (req: Request, res: Response, next: 
 
         next();
     } catch (error: any) {
-        console.error('Warehouse access check error:', error);
+        logger.error('Warehouse access check error', error);
         res.status(500).json({ error: 'Warehouse access check failed' });
     }
 };
@@ -409,7 +410,7 @@ export const injectWarehouseFilter = async (req: Request, res: Response, next: N
 
         next();
     } catch (error: any) {
-        console.error('Warehouse filter injection error:', error);
+        logger.error('Warehouse filter injection error', error);
         next(); // Continue without filter on error
     }
 };

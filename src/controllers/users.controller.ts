@@ -46,6 +46,23 @@ export const updateUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { email, full_name, phone, role, is_active } = req.body;
+    const currentUser = req.user;
+
+    // Check if target user is super_admin
+    const targetUser = await query('SELECT role FROM users WHERE id = $1', [id]);
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Only super_admin can modify another super_admin
+    if (targetUser.rows[0].role === 'super_admin' && currentUser?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only Super Admin can modify Super Admin users' });
+    }
+
+    // Prevent changing super_admin role (can't demote super_admin)
+    if (targetUser.rows[0].role === 'super_admin' && role && role !== 'super_admin') {
+      return res.status(403).json({ error: 'Cannot change Super Admin role' });
+    }
 
     const result = await query(
       `UPDATE users
@@ -65,17 +82,35 @@ export const updateUser = async (req: Request, res: Response) => {
 
     res.json(result.rows[0]);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to update user' });
   }
 };
 
 export const deleteUser = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const currentUser = req.user;
+
+    // Check if target user is super_admin
+    const targetUser = await query('SELECT id, role FROM users WHERE id = $1', [id]);
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Cannot delete super_admin
+    if (targetUser.rows[0].role === 'super_admin') {
+      return res.status(403).json({ error: 'Super Admin cannot be deleted' });
+    }
+
+    // Cannot delete yourself
+    if (targetUser.rows[0].id === currentUser?.userId) {
+      return res.status(403).json({ error: 'You cannot delete yourself' });
+    }
+
     await query('DELETE FROM users WHERE id = $1', [id]);
     res.json({ message: 'User deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to delete user' });
   }
 };
 
@@ -83,9 +118,21 @@ export const changePassword = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { newPassword } = req.body;
+    const currentUser = req.user;
 
-    if (!newPassword || newPassword.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    // Check if target user is super_admin
+    const targetUser = await query('SELECT role FROM users WHERE id = $1', [id]);
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Only super_admin can change another super_admin's password
+    if (targetUser.rows[0].role === 'super_admin' && currentUser?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only Super Admin can change Super Admin password' });
     }
 
     const hashedPassword = await hashPassword(newPassword);
