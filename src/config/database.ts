@@ -29,12 +29,11 @@ export const initializeDatabase = async (): Promise<Pool> => {
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
 
-      // Pool configuration - OPTIMIZED for Supabase FREE TIER (limited connections)
-      // Supabase free tier allows ~10-15 total connections
-      // Keep some buffer for Supabase dashboard/other tools
-      max: 5,    // 5 connections = good balance for normal use + backup operations
+      // Pool configuration - OPTIMIZED for Supabase FREE TIER with Transaction Mode (port 6543)
+      // Transaction mode allows better connection sharing
+      max: 10,   // Can use more connections with transaction mode
       min: 1,    // Keep only 1 minimum connection alive  
-      idleTimeoutMillis: 15000,  // Release idle connections in 15 seconds
+      idleTimeoutMillis: 20000,  // Release idle connections in 20 seconds
       connectionTimeoutMillis: 30000,  // 30 seconds to connect
       allowExitOnIdle: true,  // Release all connections when idle
 
