@@ -38,6 +38,8 @@ router.get('/download-template', ctrl.downloadTemplate);
 // View routes
 router.get('/', ctrl.getMasterData);
 router.get('/batches', ctrl.getBatches);
+router.get('/brands', ctrl.getBrands);
+router.get('/categories', ctrl.getCategories);
 router.get('/export', ctrl.exportMasterData);
 
 // Create single product

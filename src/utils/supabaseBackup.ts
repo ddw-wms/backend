@@ -2,6 +2,7 @@
 /**
  * Supabase-friendly backup utilities
  * This provides JSON-based backups that work without pg_dump
+ * Uses streaming to handle large datasets (2-5GB+)
  */
 
 import { query } from '../config/database';
@@ -19,12 +20,12 @@ interface BackupOptions {
     tables?: string[];
     warehouseId?: number;
     includeUsers?: boolean;
+    onProgress?: (table: string, current: number, total: number) => void;
 }
 
 /**
- * Create a JSON backup of the database
- * This works on any PostgreSQL database including Supabase
- * Uses chunked queries for large tables to prevent timeouts
+ * Create a JSON backup of the database using STREAMING
+ * Writes directly to file to handle 2-5GB+ data without memory issues
  */
 export async function createJSONBackup(options: BackupOptions = {}) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -40,7 +41,6 @@ export async function createJSONBackup(options: BackupOptions = {}) {
         'qc',
         'picking',
         'outbound'
-
     ];
 
     if (options.includeUsers) {
@@ -48,25 +48,32 @@ export async function createJSONBackup(options: BackupOptions = {}) {
     }
 
     const tablesToBackup = options.tables || defaultTables;
+    const CHUNK_SIZE = 5000; // Smaller chunks for memory efficiency
 
-    const backupData: any = {
-        metadata: {
-            backup_date: new Date().toISOString(),
-            database: 'wms',
-            version: '1.0',
-            tables: tablesToBackup,
-            warehouse_id: options.warehouseId || 'all'
-        },
-        data: {}
+    console.log('📦 Creating streaming JSON backup...');
+
+    // Create write stream for memory-efficient file writing
+    const writeStream = fs.createWriteStream(backupFilePath, { encoding: 'utf8' });
+
+    // Write metadata header
+    const metadata = {
+        backup_date: new Date().toISOString(),
+        database: 'wms',
+        version: '2.0',
+        tables: tablesToBackup,
+        warehouse_id: options.warehouseId || 'all'
     };
 
-    console.log('📦 Creating JSON backup...');
+    writeStream.write('{\n');
+    writeStream.write(`"metadata": ${JSON.stringify(metadata, null, 2)},\n`);
+    writeStream.write('"data": {\n');
 
-    const CHUNK_SIZE = 10000; // Fetch data in chunks of 10k rows
+    let tableIndex = 0;
+    const tableStats: Record<string, number> = {};
 
     for (const tableName of tablesToBackup) {
         try {
-            // First, get total count
+            // Get total count first
             let countSql = `SELECT COUNT(*) FROM ${tableName}`;
             const countParams: any[] = [];
 
@@ -79,8 +86,16 @@ export async function createJSONBackup(options: BackupOptions = {}) {
             const countResult = await query(countSql, countParams.length > 0 ? countParams : undefined);
             const totalRows = parseInt(countResult.rows[0].count);
 
-            // If table is small enough, fetch all at once
-            if (totalRows <= CHUNK_SIZE) {
+            console.log(`  📊 ${tableName}: ${totalRows} rows`);
+
+            // Write table start
+            if (tableIndex > 0) writeStream.write(',\n');
+            writeStream.write(`"${tableName}": [\n`);
+
+            let offset = 0;
+            let rowsWritten = 0;
+
+            while (offset < totalRows || totalRows === 0) {
                 let sql = `SELECT * FROM ${tableName}`;
                 const params: any[] = [];
 
@@ -90,67 +105,71 @@ export async function createJSONBackup(options: BackupOptions = {}) {
                     params.push(options.warehouseId);
                 }
 
-                // Only add ORDER BY if table likely has created_at column
-                if (!['outbound', 'picking'].includes(tableName)) {
-                    sql += ` ORDER BY created_at DESC`;
-                }
+                sql += ` ORDER BY id LIMIT ${CHUNK_SIZE} OFFSET ${offset}`;
 
                 const result = await query(sql, params.length > 0 ? params : undefined);
-                backupData.data[tableName] = result.rows;
-            } else {
-                // Large table - fetch in chunks
-                console.log(`  📊 Large table ${tableName}: fetching ${totalRows} rows in chunks...`);
 
-                const allRows: any[] = [];
-                let offset = 0;
+                if (result.rows.length === 0) break;
 
-                while (offset < totalRows) {
-                    let sql = `SELECT * FROM ${tableName}`;
-                    const params: any[] = [];
-
-                    if (options.warehouseId &&
-                        ['inbound', 'qc', 'picking', 'outbound', 'racks'].includes(tableName)) {
-                        sql += ` WHERE warehouse_id = $1`;
-                        params.push(options.warehouseId);
-                    }
-
-                    // Add ordering by primary key for consistent pagination
-                    sql += ` ORDER BY id LIMIT ${CHUNK_SIZE} OFFSET ${offset}`;
-
-                    const result = await query(sql, params.length > 0 ? params : undefined);
-                    allRows.push(...result.rows);
-
-                    offset += CHUNK_SIZE;
-                    console.log(`    Progress: ${Math.min(offset, totalRows)}/${totalRows} rows`);
+                // Write each row
+                for (let i = 0; i < result.rows.length; i++) {
+                    if (rowsWritten > 0) writeStream.write(',\n');
+                    writeStream.write(JSON.stringify(result.rows[i]));
+                    rowsWritten++;
                 }
 
-                backupData.data[tableName] = allRows;
+                offset += CHUNK_SIZE;
+
+                // Progress callback
+                if (options.onProgress) {
+                    options.onProgress(tableName, Math.min(offset, totalRows), totalRows);
+                }
+
+                // Log progress for large tables
+                if (totalRows > 10000 && offset % 20000 === 0) {
+                    console.log(`    Progress: ${Math.min(offset, totalRows)}/${totalRows}`);
+                }
+
+                // Allow event loop to breathe (prevents blocking)
+                await new Promise(resolve => setImmediate(resolve));
             }
 
-            console.log(`  ✓ Backed up ${tableName}: ${backupData.data[tableName].length} rows`);
+            // Write table end
+            writeStream.write('\n]');
+            tableStats[tableName] = rowsWritten;
+            console.log(`  ✓ ${tableName}: ${rowsWritten} rows exported`);
+
         } catch (error: any) {
-            console.warn(`  ⚠️ Could not backup table ${tableName}:`, error.message);
-            backupData.data[tableName] = {
-                error: error.message,
-                rows: []
-            };
+            console.warn(`  ⚠️ Could not backup ${tableName}:`, error.message);
+            if (tableIndex > 0) writeStream.write(',\n');
+            writeStream.write(`"${tableName}": {"error": "${error.message}"}`);
+            tableStats[tableName] = 0;
         }
+
+        tableIndex++;
     }
 
-    // Write to file
-    fs.writeFileSync(backupFilePath, JSON.stringify(backupData, null, 2));
+    // Close JSON structure
+    writeStream.write('\n}\n}');
+
+    // Wait for stream to finish
+    await new Promise<void>((resolve, reject) => {
+        writeStream.end(() => resolve());
+        writeStream.on('error', reject);
+    });
 
     const stats = fs.statSync(backupFilePath);
     const fileSizeInMB = (stats.size / (1024 * 1024)).toFixed(2);
 
-    console.log(`✅ JSON backup created: ${backupFileName} (${fileSizeInMB} MB)`);
+    console.log(`✅ Streaming backup complete: ${backupFileName} (${fileSizeInMB} MB)`);
 
     return {
         fileName: backupFileName,
         filePath: backupFilePath,
         fileSize: stats.size,
         fileSizeMB: fileSizeInMB,
-        tableCount: tablesToBackup.length
+        tableCount: tablesToBackup.length,
+        tableStats
     };
 }
 

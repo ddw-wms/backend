@@ -9,11 +9,16 @@ const router: Router = express.Router();
 // All backup routes require authentication
 router.use(authMiddleware);
 
-// Create new backup (extended timeout for large data)
+// Create new backup (async mode - no timeout needed)
 router.post(
     '/',
-    backupTimeout,
     backupController.createBackup
+);
+
+// Check backup progress (for async backups)
+router.get(
+    '/progress/:backupId',
+    backupController.getBackupProgress
 );
 
 // Get all backups
@@ -40,19 +45,25 @@ router.get(
     backupController.downloadBackup
 );
 
-// Restore database from backup (admin only) - extended timeout
+// Restore database from backup (admin/super_admin only) - extended timeout
 router.post(
     '/restore/:id',
     backupTimeout,
-    hasRole('admin'),
+    hasRole('admin', 'super_admin'),
     backupController.restoreBackup
 );
 
-// Delete backup (admin only)
+// Delete backup (admin/super_admin only)
 router.delete(
     '/:id',
-    hasRole('admin'),
+    hasRole('admin', 'super_admin'),
     backupController.deleteBackup
+);
+
+// Selective backup (specific tables)
+router.post(
+    '/selective',
+    backupController.createSelectiveBackup
 );
 
 // Export as JSON (extended timeout)

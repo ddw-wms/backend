@@ -14,7 +14,9 @@ import {
   checkWSNExists,
   getExistingWSNs,
   getBatches,
-  deleteBatch
+  deleteBatch,
+  getBrands,
+  getCategories
 } from '../controllers/picking.controller';
 
 const router = Router();
@@ -29,6 +31,8 @@ router.get('/customers', requirePermission('feature:picking:view'), getCustomers
 router.get('/check-wsn', requirePermission('feature:picking:view'), checkWSNExists);
 router.get('/existing-wsns', injectWarehouseFilter, requirePermission('feature:picking:view'), getExistingWSNs);
 router.get('/batches', injectWarehouseFilter, requirePermission('feature:picking:view'), getBatches);
+router.get('/brands', requirePermission('feature:picking:view'), getBrands);
+router.get('/categories', requirePermission('feature:picking:view'), getCategories);
 
 // Create routes - require create permission
 router.post('/multi-entry', requireWarehouseAccess, requirePermission('feature:picking:create'), multiPickingEntry);

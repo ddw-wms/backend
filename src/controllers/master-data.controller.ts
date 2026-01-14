@@ -1298,6 +1298,62 @@ export const getBatches = async (req: Request, res: Response) => {
   }
 };
 
+// ====== GET BRANDS - unique brands from master_data (with optional category filter) ======
+export const getBrands = async (req: Request, res: Response) => {
+  try {
+    const { category } = req.query;
+
+    let sql = `
+      SELECT DISTINCT brand 
+      FROM master_data 
+      WHERE brand IS NOT NULL AND brand != ''
+    `;
+    const params: any[] = [];
+
+    // Filter by category if provided
+    if (category && category !== '') {
+      sql += ` AND cms_vertical = $1`;
+      params.push(category);
+    }
+
+    sql += ` ORDER BY brand`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.brand));
+  } catch (error: any) {
+    console.error('❌ Get master data brands error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ====== GET CATEGORIES - unique categories from master_data (with optional brand filter) ======
+export const getCategories = async (req: Request, res: Response) => {
+  try {
+    const { brand } = req.query;
+
+    let sql = `
+      SELECT DISTINCT cms_vertical 
+      FROM master_data 
+      WHERE cms_vertical IS NOT NULL AND cms_vertical != ''
+    `;
+    const params: any[] = [];
+
+    // Filter by brand if provided
+    if (brand && brand !== '') {
+      sql += ` AND brand = $1`;
+      params.push(brand);
+    }
+
+    sql += ` ORDER BY cms_vertical`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.cms_vertical));
+  } catch (error: any) {
+    console.error('❌ Get master data categories error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 export const exportMasterData = async (req: Request, res: Response) => {
   try {
     const { batchIds, dateFrom, dateTo } = req.query;

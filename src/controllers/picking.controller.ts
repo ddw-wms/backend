@@ -458,3 +458,61 @@ export const deleteBatch = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+// ====== GET BRANDS - from picking joined with master_data ======
+export const getBrands = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId } = req.query;
+
+    let sql = `
+      SELECT DISTINCT m.brand 
+      FROM picking p
+      LEFT JOIN master_data m ON p.wsn = m.wsn
+      WHERE m.brand IS NOT NULL AND m.brand != ''
+    `;
+
+    const params: any[] = [];
+
+    if (warehouseId) {
+      sql += ` AND p.warehouse_id = $1`;
+      params.push(warehouseId);
+    }
+
+    sql += ` ORDER BY m.brand`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.brand));
+  } catch (error: any) {
+    console.error('❌ Get picking brands error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ====== GET CATEGORIES - from picking joined with master_data ======
+export const getCategories = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId } = req.query;
+
+    let sql = `
+      SELECT DISTINCT m.cms_vertical 
+      FROM picking p
+      LEFT JOIN master_data m ON p.wsn = m.wsn
+      WHERE m.cms_vertical IS NOT NULL AND m.cms_vertical != ''
+    `;
+
+    const params: any[] = [];
+
+    if (warehouseId) {
+      sql += ` AND p.warehouse_id = $1`;
+      params.push(warehouseId);
+    }
+
+    sql += ` ORDER BY m.cms_vertical`;
+
+    const result = await query(sql, params);
+    res.json(result.rows.map((r: any) => r.cms_vertical));
+  } catch (error: any) {
+    console.error('❌ Get picking categories error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

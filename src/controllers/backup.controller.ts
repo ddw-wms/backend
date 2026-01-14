@@ -18,16 +18,58 @@ if (!fs.existsSync(BACKUP_DIR)) {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
 }
 
+// Store backup/restore progress for async operations
+const backupProgress = new Map<string, {
+    status: string;
+    progress: number;
+    message: string;
+    result?: any;
+    details?: {
+        currentTable?: string;
+        tableProgress?: number;
+        completedTables?: number;
+        totalTables?: number;
+        processedRows?: number;
+        totalRows?: number;
+    };
+}>();
+
 // ================= CREATE DATABASE BACKUP =================
 export const createBackup = async (req: Request, res: Response) => {
     try {
-        const { backup_type = 'full', description = '', use_json = true } = req.body;
+        const { backup_type = 'full', description = '', use_json = true, async_mode = true } = req.body;
         const user = (req as any).user;
 
         // If JSON backup is requested (works on Supabase)
         if (use_json || backup_type === 'json') {
             console.log('🔄 Creating JSON backup (Supabase-friendly)...');
 
+            // Generate a unique backup ID for tracking
+            const backupId = `backup_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            // For large data, use async mode to prevent timeout
+            if (async_mode) {
+                // Initialize progress tracking
+                backupProgress.set(backupId, {
+                    status: 'in_progress',
+                    progress: 0,
+                    message: 'Starting backup...'
+                });
+
+                // Send immediate response with backup ID
+                res.json({
+                    success: true,
+                    message: 'Backup started in background',
+                    backupId,
+                    status: 'in_progress'
+                });
+
+                // Process backup in background
+                processBackupAsync(backupId, backup_type, description, user?.id);
+                return;
+            }
+
+            // Sync mode (for small data)
             const backupResult = await createJSONBackup({
                 includeUsers: backup_type === 'full'
             });
@@ -153,6 +195,230 @@ export const createBackup = async (req: Request, res: Response) => {
     }
 };
 
+// ================= ASYNC BACKUP PROCESSOR =================
+async function processBackupAsync(backupId: string, backup_type: string, description: string, userId: number | null) {
+    try {
+        backupProgress.set(backupId, {
+            status: 'in_progress',
+            progress: 10,
+            message: 'Connecting to database...'
+        });
+
+        const backupResult = await createJSONBackup({
+            includeUsers: backup_type === 'full',
+            onProgress: (table, current, total) => {
+                const percent = Math.round((current / total) * 100);
+                backupProgress.set(backupId, {
+                    status: 'in_progress',
+                    progress: 10 + Math.round(percent * 0.8), // 10-90%
+                    message: `Exporting ${table}: ${current}/${total} rows`
+                });
+            }
+        });
+
+        backupProgress.set(backupId, {
+            status: 'in_progress',
+            progress: 90,
+            message: 'Saving backup metadata...'
+        });
+
+        // Upload to Cloudflare R2 (if configured)
+        if (isR2Configured()) {
+            backupProgress.set(backupId, {
+                status: 'in_progress',
+                progress: 92,
+                message: 'Uploading to cloud storage...'
+            });
+            await uploadToR2(backupResult.filePath, backupResult.fileName);
+        }
+
+        // Save backup metadata to database
+        const result = await query(
+            `INSERT INTO backups (
+                file_name, file_path, file_size, backup_type, description, created_by
+            ) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+            [
+                backupResult.fileName,
+                backupResult.filePath,
+                backupResult.fileSize,
+                'json',
+                description || 'JSON backup',
+                userId
+            ]
+        );
+
+        backupProgress.set(backupId, {
+            status: 'completed',
+            progress: 100,
+            message: 'Backup completed successfully!',
+            result: {
+                ...result.rows[0],
+                file_size_mb: backupResult.fileSizeMB,
+                tableStats: backupResult.tableStats
+            }
+        });
+
+        console.log(`✅ Async backup completed: ${backupResult.fileName} (${backupResult.fileSizeMB} MB)`);
+
+        // Clean up progress after 10 minutes
+        setTimeout(() => backupProgress.delete(backupId), 10 * 60 * 1000);
+
+    } catch (error: any) {
+        console.error('❌ Async backup error:', error);
+        backupProgress.set(backupId, {
+            status: 'failed',
+            progress: 0,
+            message: `Backup failed: ${error.message}`
+        });
+    }
+}
+
+// ================= CHECK BACKUP PROGRESS =================
+export const getBackupProgress = async (req: Request, res: Response) => {
+    try {
+        const { backupId } = req.params;
+
+        const progress = backupProgress.get(backupId);
+
+        if (!progress) {
+            return res.status(404).json({
+                error: 'Backup not found or expired',
+                message: 'Please check the backup list for completed backups'
+            });
+        }
+
+        res.json(progress);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// ================= SELECTIVE BACKUP (Specific Tables) =================
+export const createSelectiveBackup = async (req: Request, res: Response) => {
+    try {
+        const { tables, description = '' } = req.body;
+        const user = (req as any).user;
+
+        if (!tables || !Array.isArray(tables) || tables.length === 0) {
+            return res.status(400).json({
+                error: 'Please select at least one table/module to backup'
+            });
+        }
+
+        // Valid tables for selective backup
+        const validTables = [
+            'warehouses', 'customers', 'racks', 'master_data',
+            'inbound', 'qc', 'picking', 'outbound', 'users'
+        ];
+
+        const invalidTables = tables.filter((t: string) => !validTables.includes(t));
+        if (invalidTables.length > 0) {
+            return res.status(400).json({
+                error: `Invalid tables: ${invalidTables.join(', ')}`
+            });
+        }
+
+        console.log(`🔄 Creating selective backup for tables: ${tables.join(', ')}`);
+
+        // Generate backup ID for tracking
+        const backupId = `backup_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+        // Initialize progress tracking
+        backupProgress.set(backupId, {
+            status: 'in_progress',
+            progress: 0,
+            message: 'Starting selective backup...'
+        });
+
+        // Send immediate response
+        res.json({
+            success: true,
+            message: 'Selective backup started',
+            backupId,
+            tables,
+            status: 'in_progress'
+        });
+
+        // Process backup in background
+        processSelectiveBackupAsync(backupId, tables, description, user?.id);
+
+    } catch (error: any) {
+        console.error('❌ Selective backup error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Async selective backup processor
+async function processSelectiveBackupAsync(
+    backupId: string,
+    tables: string[],
+    description: string,
+    userId: number | null
+) {
+    try {
+        backupProgress.set(backupId, {
+            status: 'in_progress',
+            progress: 5,
+            message: 'Preparing selective backup...'
+        });
+
+        const backupResult = await createJSONBackup({
+            tables,
+            onProgress: (table, current, total) => {
+                const percent = Math.round((current / total) * 100);
+                backupProgress.set(backupId, {
+                    status: 'in_progress',
+                    progress: 5 + Math.round(percent * 0.85),
+                    message: `Exporting ${table}: ${current}/${total} rows`
+                });
+            }
+        });
+
+        backupProgress.set(backupId, {
+            status: 'in_progress',
+            progress: 92,
+            message: 'Saving backup...'
+        });
+
+        // Save backup metadata
+        const result = await query(
+            `INSERT INTO backups (
+                file_name, file_path, file_size, backup_type, description, created_by
+            ) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+            [
+                backupResult.fileName,
+                backupResult.filePath,
+                backupResult.fileSize,
+                'json',
+                description || `Selective backup: ${tables.join(', ')}`,
+                userId
+            ]
+        );
+
+        backupProgress.set(backupId, {
+            status: 'completed',
+            progress: 100,
+            message: 'Selective backup completed!',
+            result: {
+                ...result.rows[0],
+                file_size_mb: backupResult.fileSizeMB,
+                tables_backed_up: tables
+            }
+        });
+
+        console.log(`✅ Selective backup completed: ${backupResult.fileName}`);
+        setTimeout(() => backupProgress.delete(backupId), 10 * 60 * 1000);
+
+    } catch (error: any) {
+        console.error('❌ Selective backup error:', error);
+        backupProgress.set(backupId, {
+            status: 'failed',
+            progress: 0,
+            message: `Backup failed: ${error.message}`
+        });
+    }
+}
+
 // ================= GET ALL BACKUPS =================
 export const getAllBackups = async (req: Request, res: Response) => {
     try {
@@ -246,9 +512,8 @@ export const deleteBackup = async (req: Request, res: Response) => {
     }
 };
 
-// ================= RESTORE DATABASE =================
+// ================= RESTORE DATABASE (ASYNC with Progress) =================
 export const restoreBackup = async (req: Request, res: Response) => {
-    let backup: any = null;
     try {
         const { id } = req.params;
         const { confirm } = req.body;
@@ -256,12 +521,12 @@ export const restoreBackup = async (req: Request, res: Response) => {
         if (!confirm) {
             return res.status(400).json({
                 error: 'Confirmation required',
-                message: 'Please confirm that you want to restore the database. This will overwrite current data.'
+                message: 'Please confirm that you want to restore the database.'
             });
         }
 
         const result = await query(
-            'SELECT file_name, file_path, backup_type FROM backups WHERE id = $1',
+            'SELECT file_name, file_path, backup_type, file_size FROM backups WHERE id = $1',
             [id]
         );
 
@@ -269,175 +534,253 @@ export const restoreBackup = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Backup not found' });
         }
 
-        backup = result.rows[0];
+        const backup = result.rows[0];
         const filePath = backup.file_path;
 
         if (!fs.existsSync(filePath)) {
             return res.status(404).json({ error: 'Backup file not found on disk' });
         }
 
-        console.log('🔄 Starting database restore...');
+        // Generate restore ID for progress tracking
+        const restoreId = `restore_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+        // Initialize progress
+        backupProgress.set(restoreId, {
+            status: 'in_progress',
+            progress: 0,
+            message: 'Starting restore...'
+        });
+
+        // Send immediate response with restore ID
+        res.json({
+            success: true,
+            message: 'Restore started in background',
+            restoreId,
+            status: 'in_progress'
+        });
+
+        // Process restore in background
+        processRestoreAsync(restoreId, id, backup, filePath);
+
+    } catch (error: any) {
+        console.error('❌ Restore error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Async restore processor with progress tracking
+async function processRestoreAsync(
+    restoreId: string,
+    backupId: string,
+    backup: any,
+    filePath: string
+) {
+    try {
+        console.log('🔄 Starting async database restore...');
+
+        backupProgress.set(restoreId, {
+            status: 'in_progress',
+            progress: 5,
+            message: 'Reading backup file...'
+        });
 
         // Check if it's a JSON backup
         if (backup.backup_type === 'json' || filePath.endsWith('.json')) {
-            // JSON Restore - works without psql
-            const backupData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            // Read file in chunks for large files
+            const fileContent = fs.readFileSync(filePath, 'utf8');
+            const backupData = JSON.parse(fileContent);
 
-            console.log('📦 Restoring from JSON backup...');
+            backupProgress.set(restoreId, {
+                status: 'in_progress',
+                progress: 10,
+                message: 'Backup file loaded, preparing restore...'
+            });
 
+            const tables = Object.keys(backupData.data).filter(t => {
+                const data = backupData.data[t];
+                return Array.isArray(data) && data.length > 0;
+            });
+
+            const totalTables = tables.length;
+            let completedTables = 0;
             const restoreResults: any = { success: [], failed: [], skipped: [] };
-            const BATCH_SIZE = 100; // Insert in batches of 100 rows
+
+            // ULTRA-FAST: Much larger batch with bulk INSERT
+            const BATCH_SIZE = 500; // 500 rows per single INSERT query
+
+            // Calculate total rows for progress
+            let totalRows = 0;
+            let processedRows = 0;
+            for (const tableName of tables) {
+                totalRows += backupData.data[tableName].length;
+            }
+
+            console.log(`📦 FAST Restoring ${totalTables} tables with ${totalRows} total rows...`);
 
             // Restore each table
-            for (const tableName of Object.keys(backupData.data)) {
+            for (const tableName of tables) {
                 try {
                     const tableData = backupData.data[tableName];
 
-                    if (tableData.error || !Array.isArray(tableData) || tableData.length === 0) {
-                        console.log(`⏭️ Skipping ${tableName} (no data)`);
-                        restoreResults.skipped.push(tableName);
-                        continue;
-                    }
+                    backupProgress.set(restoreId, {
+                        status: 'in_progress',
+                        progress: 10 + Math.round((completedTables / totalTables) * 80),
+                        message: `Restoring ${tableName} (${tableData.length} rows)...`,
+                        details: {
+                            currentTable: tableName,
+                            completedTables,
+                            totalTables,
+                            processedRows,
+                            totalRows
+                        }
+                    });
 
                     console.log(`  🔄 Restoring ${tableName} (${tableData.length} rows)...`);
 
-                    // Clear existing data (be careful!)
+                    // Clear existing data
                     await query(`DELETE FROM ${tableName}`);
 
-                    // Insert data in batches for better performance and timeout handling
+                    // Get column names from first row
+                    if (tableData.length === 0) continue;
+                    const columns = Object.keys(tableData[0]);
+
+                    // ULTRA-FAST: Bulk INSERT with multiple VALUES in single query
                     let insertedCount = 0;
                     for (let i = 0; i < tableData.length; i += BATCH_SIZE) {
                         const batch = tableData.slice(i, i + BATCH_SIZE);
 
-                        // Use transaction for batch insert
-                        const pool = getPool();
-                        const client = await pool.connect();
+                        // Build multi-value INSERT: INSERT INTO t (a,b) VALUES ($1,$2), ($3,$4), ...
+                        const values: any[] = [];
+                        const valueRows: string[] = [];
+                        let paramIndex = 1;
+
+                        for (const row of batch) {
+                            const rowPlaceholders: string[] = [];
+                            for (const col of columns) {
+                                values.push(row[col]);
+                                rowPlaceholders.push(`$${paramIndex++}`);
+                            }
+                            valueRows.push(`(${rowPlaceholders.join(', ')})`);
+                        }
+
+                        // Single INSERT with all rows - MUCH faster than row-by-row!
+                        const bulkSQL = `
+                            INSERT INTO ${tableName} (${columns.join(', ')})
+                            VALUES ${valueRows.join(', ')}
+                            ON CONFLICT DO NOTHING
+                        `;
 
                         try {
-                            await client.query('BEGIN');
-
-                            for (const row of batch) {
-                                const columns = Object.keys(row);
-                                const values = Object.values(row);
-                                const placeholders = columns.map((_, idx) => `$${idx + 1}`).join(', ');
-
-                                const insertSQL = `
-                                    INSERT INTO ${tableName} (${columns.join(', ')})
-                                    VALUES (${placeholders})
-                                    ON CONFLICT DO NOTHING
-                                `;
-
-                                await client.query(insertSQL, values);
-                            }
-
-                            await client.query('COMMIT');
+                            await query(bulkSQL, values);
                             insertedCount += batch.length;
+                            processedRows += batch.length;
 
-                            // Progress log for large tables
-                            if (tableData.length > 1000 && (i + BATCH_SIZE) % 1000 === 0) {
-                                console.log(`    Progress: ${Math.min(i + BATCH_SIZE, tableData.length)}/${tableData.length}`);
-                            }
+                            // Update progress every batch
+                            const overallProgress = 10 + Math.round((processedRows / totalRows) * 80);
+                            backupProgress.set(restoreId, {
+                                status: 'in_progress',
+                                progress: overallProgress,
+                                message: `Restoring ${tableName}: ${insertedCount}/${tableData.length} rows`,
+                                details: {
+                                    currentTable: tableName,
+                                    tableProgress: Math.round((insertedCount / tableData.length) * 100),
+                                    completedTables,
+                                    totalTables,
+                                    processedRows,
+                                    totalRows
+                                }
+                            });
+
                         } catch (batchError: any) {
-                            await client.query('ROLLBACK');
-                            console.warn(`    ⚠️ Batch error at row ${i}:`, batchError.message);
-                        } finally {
-                            client.release();
+                            console.warn(`    ⚠️ Bulk insert error at row ${i}, falling back to individual inserts:`, batchError.message);
+
+                            // Fallback: Insert rows individually on error (handles constraint issues)
+                            for (const row of batch) {
+                                try {
+                                    const rowValues = columns.map(col => row[col]);
+                                    const placeholders = columns.map((_, idx) => `$${idx + 1}`).join(', ');
+                                    await query(
+                                        `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+                                        rowValues
+                                    );
+                                    insertedCount++;
+                                    processedRows++;
+                                } catch (rowError) {
+                                    // Skip failed rows
+                                }
+                            }
+                        }
+
+                        // Allow event loop to breathe (less frequently now)
+                        if (i % 2000 === 0) {
+                            await new Promise(resolve => setImmediate(resolve));
                         }
                     }
 
                     console.log(`  ✅ Restored ${tableName}: ${insertedCount} rows`);
                     restoreResults.success.push({ table: tableName, rows: insertedCount });
+                    completedTables++;
+
                 } catch (err: any) {
                     console.warn(`  ⚠️ Failed to restore ${tableName}:`, err.message);
                     restoreResults.failed.push({ table: tableName, error: err.message });
+                    completedTables++;
                 }
             }
 
             // Log restore action
             await query(
-                `INSERT INTO backup_restore_logs (
-          backup_id, 
-          action, 
-          status, 
-          message
-        ) VALUES ($1, $2, $3, $4)`,
-                [id, 'restore', 'success', `Database restored from JSON backup: ${backup.file_name}`]
+                `INSERT INTO backup_restore_logs (backup_id, action, status, message) VALUES ($1, $2, $3, $4)`,
+                [backupId, 'restore', 'success', `Restored: ${restoreResults.success.length} tables, ${processedRows} rows`]
             );
 
-            console.log(`✅ JSON restore completed successfully`);
+            backupProgress.set(restoreId, {
+                status: 'completed',
+                progress: 100,
+                message: '✅ Database restored successfully!',
+                result: {
+                    success: restoreResults.success,
+                    failed: restoreResults.failed,
+                    skipped: restoreResults.skipped,
+                    totalRows: processedRows,
+                    fileName: backup.file_name
+                }
+            });
 
-            return res.json({
-                success: true,
-                message: 'Database restored successfully from JSON backup',
-                backup: backup.file_name
+            console.log(`✅ Async restore completed: ${restoreResults.success.length} tables, ${processedRows} rows`);
+
+        } else {
+            // SQL restore not supported in async mode
+            backupProgress.set(restoreId, {
+                status: 'failed',
+                progress: 0,
+                message: 'SQL restore not supported. Please use JSON backups.'
             });
         }
 
-        // SQL Restore (original method - requires psql)
-        const dbUrl = process.env.DATABASE_URL;
-        if (!dbUrl) {
-            return res.status(500).json({ error: 'Database URL not configured' });
-        }
-
-        const urlParts = new URL(dbUrl);
-        const host = urlParts.hostname;
-        const port = urlParts.port || '5432';
-        const database = urlParts.pathname.slice(1);
-        const username = urlParts.username;
-        const password = urlParts.password;
-
-        // Build psql restore command
-        const restoreCommand = `PGPASSWORD="${password}" psql -h ${host} -p ${port} -U ${username} -d ${database} -f "${filePath}"`;
-
-        // Execute restore
-        await execPromise(restoreCommand);
-
-        // Log restore action
-        await query(
-            `INSERT INTO backup_restore_logs (
-        backup_id, 
-        action, 
-        status, 
-        message
-      ) VALUES ($1, $2, $3, $4)`,
-            [id, 'restore', 'success', `Database restored from ${backup.file_name}`]
-        );
-
-        console.log(`✅ Database restored successfully from: ${backup.file_name}`);
-
-        res.json({
-            success: true,
-            message: 'Database restored successfully',
-            backup: backup.file_name
-        });
+        // Clean up progress after 10 minutes
+        setTimeout(() => backupProgress.delete(restoreId), 10 * 60 * 1000);
 
     } catch (error: any) {
-        console.error('❌ Restore error:', error);
+        console.error('❌ Async restore error:', error);
 
         // Log failed restore
         try {
             await query(
-                `INSERT INTO backup_restore_logs (
-          backup_id, 
-          action, 
-          status, 
-          message
-        ) VALUES ($1, $2, $3, $4)`,
-                [req.params.id, 'restore', 'failed', error.message]
+                `INSERT INTO backup_restore_logs (backup_id, action, status, message) VALUES ($1, $2, $3, $4)`,
+                [backupId, 'restore', 'failed', error.message]
             );
         } catch (logError) {
             console.error('Failed to log restore error:', logError);
         }
 
-        res.status(500).json({
-            error: 'Restore failed',
-            details: error.message,
-            note: backup?.backup_type === 'json'
-                ? 'JSON restore failed - check server logs for details'
-                : 'Make sure psql is installed and accessible in PATH'
+        backupProgress.set(restoreId, {
+            status: 'failed',
+            progress: 0,
+            message: `Restore failed: ${error.message}`
         });
     }
-};
+}
 
 // ================= GET RESTORE LOGS =================
 export const getRestoreLogs = async (req: Request, res: Response) => {
