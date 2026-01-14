@@ -4,18 +4,20 @@ import { Request, Response, NextFunction } from 'express';
 /**
  * Request timeout middleware
  * Prevents requests from hanging indefinitely
+ * Increased timeouts for remote Supabase database
  * 
- * @param timeoutMs - Timeout in milliseconds (default: 30 seconds)
+ * @param timeoutMs - Timeout in milliseconds (default: 60 seconds)
  */
-export const requestTimeout = (timeoutMs: number = 30000) => {
+export const requestTimeout = (timeoutMs: number = 60000) => {
     return (req: Request, res: Response, next: NextFunction) => {
         // Set timeout
         const timeout = setTimeout(() => {
             if (!res.headersSent) {
                 res.status(408).json({
                     error: 'Request Timeout',
-                    message: 'Request took too long to process',
-                    timeout: `${timeoutMs / 1000}s`
+                    message: 'Request took too long to process. Please try again or use filters to reduce data.',
+                    timeout: `${timeoutMs / 1000}s`,
+                    isRetryable: true
                 });
             }
         }, timeoutMs);
@@ -25,16 +27,32 @@ export const requestTimeout = (timeoutMs: number = 30000) => {
             clearTimeout(timeout);
         });
 
+        // Also clear on close (client disconnect)
+        res.on('close', () => {
+            clearTimeout(timeout);
+        });
+
         next();
     };
 };
 
 /**
- * Longer timeout for file uploads (5 minutes)
+ * Longer timeout for file uploads and bulk operations (10 minutes)
  */
-export const uploadTimeout = requestTimeout(5 * 60 * 1000);
+export const uploadTimeout = requestTimeout(10 * 60 * 1000);
 
 /**
- * Standard timeout for API requests (30 seconds)
+ * Backup/Restore operations timeout (20 minutes)
  */
-export const apiTimeout = requestTimeout(30 * 1000);
+export const backupTimeout = requestTimeout(20 * 60 * 1000);
+
+/**
+ * Standard timeout for API requests (60 seconds)
+ * Increased from 30s due to remote Supabase database latency
+ */
+export const apiTimeout = requestTimeout(60 * 1000);
+
+/**
+ * Extended timeout for data-heavy list requests (2 minutes)
+ */
+export const listTimeout = requestTimeout(2 * 60 * 1000);

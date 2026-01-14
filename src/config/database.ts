@@ -25,17 +25,19 @@ export const initializeDatabase = async (): Promise<Pool> => {
       connectionString: dbUrl,
       ssl: { rejectUnauthorized: false },
 
-      // MOST IMPORTANT for Supabase:
+      // MOST IMPORTANT for Supabase/Remote DB:
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
 
-      max: 3,   //if  query very slow (seconds/minutes) then we can increase max: 4 or 5
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 7000,
+      // Pool configuration - increased for better concurrency
+      max: 10,   // Increased for concurrent requests
+      min: 2,    // Keep minimum connections alive
+      idleTimeoutMillis: 60000,  // 60 seconds idle timeout
+      connectionTimeoutMillis: 30000,  // 30 seconds to connect (increased for slow networks)
 
-      // Query timeouts for production stability
-      statement_timeout: 30000,  // 30 seconds max per statement
-      query_timeout: 60000,      // 60 seconds max per query
+      // Query timeouts - increased for large data operations
+      statement_timeout: 120000,  // 2 minutes max per statement (for backup/restore)
+      query_timeout: 180000,      // 3 minutes max per query (for large exports)
     });
 
   // test connection before assigning
@@ -93,7 +95,42 @@ export const getPool = (): Pool => {
   return pool;
 };
 
-export const query = async (text: string, params?: any[]) => {
+export const query = async (text: string, params?: any[], retries = 2) => {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const p = getPool();
+      return await p.query(text, params);
+    } catch (error: any) {
+      lastError = error;
+
+      // Don't retry on syntax errors or constraint violations
+      if (error.code === '42601' || error.code === '23505' || error.code === '23503') {
+        throw error;
+      }
+
+      // Retry on connection/timeout errors
+      if (attempt < retries && (
+        error.message?.includes('timeout') ||
+        error.message?.includes('ECONNRESET') ||
+        error.message?.includes('connection') ||
+        error.code === 'ECONNREFUSED'
+      )) {
+        console.log(`⚠️ Query attempt ${attempt + 1} failed, retrying in 1s...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
+};
+
+// Simple query without retry (for performance-critical operations)
+export const queryNoRetry = async (text: string, params?: any[]) => {
   const p = getPool();
   return p.query(text, params);
 };

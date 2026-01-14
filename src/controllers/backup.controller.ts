@@ -285,6 +285,9 @@ export const restoreBackup = async (req: Request, res: Response) => {
 
             console.log('📦 Restoring from JSON backup...');
 
+            const restoreResults: any = { success: [], failed: [], skipped: [] };
+            const BATCH_SIZE = 100; // Insert in batches of 100 rows
+
             // Restore each table
             for (const tableName of Object.keys(backupData.data)) {
                 try {
@@ -292,32 +295,61 @@ export const restoreBackup = async (req: Request, res: Response) => {
 
                     if (tableData.error || !Array.isArray(tableData) || tableData.length === 0) {
                         console.log(`⏭️ Skipping ${tableName} (no data)`);
+                        restoreResults.skipped.push(tableName);
                         continue;
                     }
 
-                    console.log(`  🔄 Restoring ${tableName}...`);
+                    console.log(`  🔄 Restoring ${tableName} (${tableData.length} rows)...`);
 
                     // Clear existing data (be careful!)
                     await query(`DELETE FROM ${tableName}`);
 
-                    // Insert data row by row
-                    for (const row of tableData) {
-                        const columns = Object.keys(row);
-                        const values = Object.values(row);
-                        const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+                    // Insert data in batches for better performance and timeout handling
+                    let insertedCount = 0;
+                    for (let i = 0; i < tableData.length; i += BATCH_SIZE) {
+                        const batch = tableData.slice(i, i + BATCH_SIZE);
 
-                        const insertSQL = `
-              INSERT INTO ${tableName} (${columns.join(', ')})
-              VALUES (${placeholders})
-              ON CONFLICT DO NOTHING
-            `;
+                        // Use transaction for batch insert
+                        const pool = getPool();
+                        const client = await pool.connect();
 
-                        await query(insertSQL, values);
+                        try {
+                            await client.query('BEGIN');
+
+                            for (const row of batch) {
+                                const columns = Object.keys(row);
+                                const values = Object.values(row);
+                                const placeholders = columns.map((_, idx) => `$${idx + 1}`).join(', ');
+
+                                const insertSQL = `
+                                    INSERT INTO ${tableName} (${columns.join(', ')})
+                                    VALUES (${placeholders})
+                                    ON CONFLICT DO NOTHING
+                                `;
+
+                                await client.query(insertSQL, values);
+                            }
+
+                            await client.query('COMMIT');
+                            insertedCount += batch.length;
+
+                            // Progress log for large tables
+                            if (tableData.length > 1000 && (i + BATCH_SIZE) % 1000 === 0) {
+                                console.log(`    Progress: ${Math.min(i + BATCH_SIZE, tableData.length)}/${tableData.length}`);
+                            }
+                        } catch (batchError: any) {
+                            await client.query('ROLLBACK');
+                            console.warn(`    ⚠️ Batch error at row ${i}:`, batchError.message);
+                        } finally {
+                            client.release();
+                        }
                     }
 
-                    console.log(`  ✅ Restored ${tableName}: ${tableData.length} rows`);
+                    console.log(`  ✅ Restored ${tableName}: ${insertedCount} rows`);
+                    restoreResults.success.push({ table: tableName, rows: insertedCount });
                 } catch (err: any) {
                     console.warn(`  ⚠️ Failed to restore ${tableName}:`, err.message);
+                    restoreResults.failed.push({ table: tableName, error: err.message });
                 }
             }
 

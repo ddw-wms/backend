@@ -203,19 +203,11 @@ export const getQCList = async (req: Request, res: Response) => {
     const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
     const countWhereClause = countWhereConditions.length > 0 ? 'WHERE ' + countWhereConditions.join(' AND ') : '';
 
-    // OPTIMIZED: Fast count - avoid JOIN when not needed
-    let total = 0;
-    if (needsMasterJoin) {
-      const countSql = `SELECT COUNT(*) FROM qc q LEFT JOIN master_data m ON q.wsn = m.wsn ${countWhereClause}`;
-      const countResult = await query(countSql, countParams);
-      total = parseInt(countResult.rows[0]?.count || '0');
-    } else {
-      const countSql = `SELECT COUNT(*) FROM qc q ${countWhereClause}`;
-      const countResult = await query(countSql, countParams);
-      total = parseInt(countResult.rows[0]?.count || '0');
-    }
+    // OPTIMIZED: Run count and ID queries in PARALLEL
+    const countSql = needsMasterJoin
+      ? `SELECT COUNT(*) FROM qc q LEFT JOIN master_data m ON q.wsn = m.wsn ${countWhereClause}`
+      : `SELECT COUNT(*) FROM qc q ${countWhereClause}`;
 
-    // PHASE 1: Get IDs only (fast with index)
     const idsSql = `
       SELECT q.id
       FROM qc q
@@ -225,7 +217,14 @@ export const getQCList = async (req: Request, res: Response) => {
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
     params.push(Number(limit), offset);
-    const idsResult = await query(idsSql, params);
+
+    // Run both queries in parallel
+    const [countResult, idsResult] = await Promise.all([
+      query(countSql, countParams),
+      query(idsSql, params)
+    ]);
+
+    const total = parseInt(countResult.rows[0]?.count || '0');
     const ids = idsResult.rows.map((r: any) => r.id);
 
     // If no results, return empty

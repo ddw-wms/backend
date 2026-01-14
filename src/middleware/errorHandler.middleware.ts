@@ -42,12 +42,78 @@ const logErrorToDb = async (
   }
 };
 
+// Identify error types for user-friendly messages
+const getErrorDetails = (error: any): { message: string; statusCode: number; isRetryable: boolean } => {
+  const errorMessage = error.message?.toLowerCase() || '';
+  const errorCode = error.code || '';
+
+  // Database connection timeout
+  if (errorMessage.includes('timeout exceeded when trying to connect') ||
+    errorMessage.includes('connection timeout') ||
+    errorCode === 'ETIMEDOUT') {
+    return {
+      message: 'Database connection is slow. Please try again in a moment.',
+      statusCode: 503,
+      isRetryable: true
+    };
+  }
+
+  // Query timeout
+  if (errorMessage.includes('query read timeout') ||
+    errorMessage.includes('statement timeout') ||
+    errorMessage.includes('canceling statement due to statement timeout')) {
+    return {
+      message: 'Request is taking too long. Please try again or use filters to reduce data.',
+      statusCode: 504,
+      isRetryable: true
+    };
+  }
+
+  // Network errors
+  if (errorCode === 'ECONNREFUSED' ||
+    errorCode === 'ECONNRESET' ||
+    errorCode === 'ENOTFOUND' ||
+    errorMessage.includes('network') ||
+    errorMessage.includes('socket hang up')) {
+    return {
+      message: 'Network connection issue. Please check your internet and try again.',
+      statusCode: 503,
+      isRetryable: true
+    };
+  }
+
+  // Pool exhaustion
+  if (errorMessage.includes('cannot acquire a connection') ||
+    errorMessage.includes('too many clients') ||
+    errorMessage.includes('connection pool') ||
+    errorMessage.includes('pool is draining')) {
+    return {
+      message: 'Server is busy. Please wait a moment and try again.',
+      statusCode: 503,
+      isRetryable: true
+    };
+  }
+
+  // Default error
+  return {
+    message: error.message || 'An unexpected error occurred. Please try again.',
+    statusCode: error.statusCode || 500,
+    isRetryable: false
+  };
+};
+
 export const errorHandler = (
   error: any,
   req: Request,
   res: Response,
   next: NextFunction
 ) => {
+  // CRITICAL: Check if headers already sent to prevent double-response crash
+  if (res.headersSent) {
+    console.error('⚠️ Headers already sent, cannot send error response:', error.message);
+    return next(error);
+  }
+
   // Log to console with full details
   logger.error('API Error', error, {
     endpoint: req.path,
@@ -59,19 +125,21 @@ export const errorHandler = (
   // Parse stack trace for file/line info
   const stackTrace = parseStackTrace(error.stack);
 
-  // Log to database (async - don't wait)
-  logErrorToDb(
-    error.message || 'Unknown error',
-    req.path,
-    req.method,
-    req.user?.username || 'anonymous',
-    stackTrace
-  );
+  // Log to database (async - don't wait) - skip if it's a DB error
+  const errorDetails = getErrorDetails(error);
+  if (!errorDetails.isRetryable) {
+    logErrorToDb(
+      error.message || 'Unknown error',
+      req.path,
+      req.method,
+      req.user?.username || 'anonymous',
+      stackTrace
+    );
+  }
 
-  const statusCode = error.statusCode || 500;
-
-  res.status(statusCode).json({
-    error: 'An error occurred. Please try again.',
+  res.status(errorDetails.statusCode).json({
+    error: errorDetails.message,
+    isRetryable: errorDetails.isRetryable,
     timestamp: new Date().toISOString(),
     path: req.path,
   });

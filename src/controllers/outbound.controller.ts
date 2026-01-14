@@ -823,19 +823,11 @@ export const getList = async (req: Request, res: Response) => {
       ? `WHERE ${countWhereConditions.join(' AND ')}`
       : '';
 
-    // OPTIMIZED: Fast count - avoid JOIN when not needed
-    let total = 0;
-    if (needsMasterJoin) {
-      const countSql = `SELECT COUNT(*) as total FROM outbound o LEFT JOIN master_data m ON o.wsn = m.wsn ${countWhereClause}`;
-      const countResult = await query(countSql, countParams);
-      total = parseInt(countResult.rows[0].total);
-    } else {
-      const countSql = `SELECT COUNT(*) as total FROM outbound o ${countWhereClause}`;
-      const countResult = await query(countSql, countParams);
-      total = parseInt(countResult.rows[0].total);
-    }
+    // OPTIMIZED: Run count and ID queries in PARALLEL
+    const countSql = needsMasterJoin
+      ? `SELECT COUNT(*) as total FROM outbound o LEFT JOIN master_data m ON o.wsn = m.wsn ${countWhereClause}`
+      : `SELECT COUNT(*) as total FROM outbound o ${countWhereClause}`;
 
-    // PHASE 1: Get IDs only (fast with index on id DESC)
     const idsSql = `
       SELECT o.id
       FROM outbound o
@@ -845,7 +837,14 @@ export const getList = async (req: Request, res: Response) => {
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
     params.push(Number(limit), offset);
-    const idsResult = await query(idsSql, params);
+
+    // Run both queries in parallel
+    const [countResult, idsResult] = await Promise.all([
+      query(countSql, countParams),
+      query(idsSql, params)
+    ]);
+
+    const total = parseInt(countResult.rows[0].total);
     const ids = idsResult.rows.map((r: any) => r.id);
 
     // If no results, return empty

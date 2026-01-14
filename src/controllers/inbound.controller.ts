@@ -6,6 +6,22 @@ import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import fs from 'fs';
 
+// Simple in-memory cache for count queries (reduces DB round trips)
+const countCache = new Map<string, { count: number; timestamp: number }>();
+const COUNT_CACHE_TTL = 5000; // 5 seconds TTL - balances freshness with speed
+
+function getCachedCount(key: string): number | null {
+  const cached = countCache.get(key);
+  if (cached && Date.now() - cached.timestamp < COUNT_CACHE_TTL) {
+    return cached.count;
+  }
+  return null;
+}
+
+function setCachedCount(key: string, count: number): void {
+  countCache.set(key, { count, timestamp: Date.now() });
+}
+
 // SINGLE ENTRY 
 export const createInboundEntry = async (req: Request, res: Response) => {
   try {
@@ -832,37 +848,40 @@ export const getInboundList = async (req: Request, res: Response) => {
     const countWhereClause =
       countWhereConditions.length > 0 ? 'WHERE ' + countWhereConditions.join(' AND ') : '';
 
-    // OPTIMIZED: Get count - use simple count when no master_data filters
-    let total = 0;
-    if (needsMasterJoin) {
-      const countSql = `
-        SELECT COUNT(*)
-        FROM inbound i
-        LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
-        ${countWhereClause}
-      `;
-      const countResult = await query(countSql, countParams);
-      total = parseInt(countResult.rows[0].count);
-    } else {
-      // Fast count without JOIN when no master_data filters needed
-      const countSql = `SELECT COUNT(*) FROM inbound i ${countWhereClause}`;
-      const countResult = await query(countSql, countParams);
-      total = parseInt(countResult.rows[0].count);
-    }
+    // OPTIMIZED: Use cached count when available (reduces DB round trips)
+    const countCacheKey = `inbound_${warehouseId}_${search}_${brand}_${category}_${dateFrom}_${dateTo}_${batchId}`;
+    let total = getCachedCount(countCacheKey);
 
-    // OPTIMIZED: Two-phase query - first get IDs with pagination, then enrich with master_data
-    // This is much faster than JOIN + LIMIT/OFFSET on large tables
+    const countSql = needsMasterJoin
+      ? `SELECT COUNT(*) FROM inbound i LEFT JOIN master_data m ON i.wsn = m.wsn ${countWhereClause}`
+      : `SELECT COUNT(*) FROM inbound i ${countWhereClause}`;
+
     const idsSql = `
       SELECT i.id
       FROM inbound i
-      ${needsMasterJoin ? 'LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)' : ''}
+      ${needsMasterJoin ? 'LEFT JOIN master_data m ON i.wsn = m.wsn' : ''}
       ${whereClause}
       ORDER BY i.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
     params.push(Number(limit), offset);
 
-    const idsResult = await query(idsSql, params);
+    // Run queries - use cached count if available, otherwise run both
+    let idsResult;
+    if (total !== null) {
+      // Count is cached, only fetch IDs
+      idsResult = await query(idsSql, params);
+    } else {
+      // Run both in parallel
+      const [countResult, fetchedIds] = await Promise.all([
+        query(countSql, countParams),
+        query(idsSql, params)
+      ]);
+      total = parseInt(countResult.rows[0].count);
+      setCachedCount(countCacheKey, total);
+      idsResult = fetchedIds;
+    }
+
     const ids = idsResult.rows.map((r: any) => r.id);
 
     // If no results, return empty
@@ -912,7 +931,7 @@ export const getInboundList = async (req: Request, res: Response) => {
         m.fkqc_remark,
         m.fk_grade
       FROM inbound i
-      LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+      LEFT JOIN master_data m ON i.wsn = m.wsn
       WHERE i.id = ANY($1)
       ORDER BY i.created_at DESC
     `;
@@ -1020,7 +1039,7 @@ export const getBrands = async (req: Request, res: Response) => {
     let sql = `
       SELECT DISTINCT m.brand 
       FROM inbound i
-      LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+      LEFT JOIN master_data m ON i.wsn = m.wsn
       WHERE m.brand IS NOT NULL AND m.brand != ''
     `;
 
@@ -1051,7 +1070,7 @@ export const getCategories = async (req: Request, res: Response) => {
     let sql = `
       SELECT DISTINCT m.cms_vertical 
       FROM inbound i
-      LEFT JOIN master_data m ON UPPER(i.wsn) = UPPER(m.wsn)
+      LEFT JOIN master_data m ON i.wsn = m.wsn
       WHERE m.cms_vertical IS NOT NULL AND m.cms_vertical != ''
     `;
 

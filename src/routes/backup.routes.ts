@@ -1,6 +1,7 @@
 // File Path = warehouse-backend/src/routes/backup.routes.ts
 import express, { Router } from 'express';
 import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import { backupTimeout } from '../middleware/timeout.middleware';
 import * as backupController from '../controllers/backup.controller';
 
 const router: Router = express.Router();
@@ -8,9 +9,10 @@ const router: Router = express.Router();
 // All backup routes require authentication
 router.use(authMiddleware);
 
-// Create new backup
+// Create new backup (extended timeout for large data)
 router.post(
     '/',
+    backupTimeout,
     backupController.createBackup
 );
 
@@ -38,9 +40,10 @@ router.get(
     backupController.downloadBackup
 );
 
-// Restore database from backup (admin only)
+// Restore database from backup (admin only) - extended timeout
 router.post(
     '/restore/:id',
+    backupTimeout,
     hasRole('admin'),
     backupController.restoreBackup
 );
@@ -52,9 +55,10 @@ router.delete(
     backupController.deleteBackup
 );
 
-// Export as JSON
+// Export as JSON (extended timeout)
 router.post(
     '/export-json',
+    backupTimeout,
     backupController.exportAsJSON
 );
 

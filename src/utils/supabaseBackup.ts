@@ -24,6 +24,7 @@ interface BackupOptions {
 /**
  * Create a JSON backup of the database
  * This works on any PostgreSQL database including Supabase
+ * Uses chunked queries for large tables to prevent timeouts
  */
 export async function createJSONBackup(options: BackupOptions = {}) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -61,28 +62,72 @@ export async function createJSONBackup(options: BackupOptions = {}) {
 
     console.log('📦 Creating JSON backup...');
 
+    const CHUNK_SIZE = 10000; // Fetch data in chunks of 10k rows
+
     for (const tableName of tablesToBackup) {
         try {
-            let sql = `SELECT * FROM ${tableName}`;
-            const params: any[] = [];
+            // First, get total count
+            let countSql = `SELECT COUNT(*) FROM ${tableName}`;
+            const countParams: any[] = [];
 
-            // Add warehouse filter if specified
             if (options.warehouseId &&
                 ['inbound', 'qc', 'picking', 'outbound', 'racks'].includes(tableName)) {
-                sql += ` WHERE warehouse_id = $1`;
-                params.push(options.warehouseId);
+                countSql += ` WHERE warehouse_id = $1`;
+                countParams.push(options.warehouseId);
             }
 
-            // Only add ORDER BY if table likely has created_at column
-            // Skip for outbound and picking which don't have it
-            if (!['outbound', 'picking'].includes(tableName)) {
-                sql += ` ORDER BY created_at DESC`;
+            const countResult = await query(countSql, countParams.length > 0 ? countParams : undefined);
+            const totalRows = parseInt(countResult.rows[0].count);
+
+            // If table is small enough, fetch all at once
+            if (totalRows <= CHUNK_SIZE) {
+                let sql = `SELECT * FROM ${tableName}`;
+                const params: any[] = [];
+
+                if (options.warehouseId &&
+                    ['inbound', 'qc', 'picking', 'outbound', 'racks'].includes(tableName)) {
+                    sql += ` WHERE warehouse_id = $1`;
+                    params.push(options.warehouseId);
+                }
+
+                // Only add ORDER BY if table likely has created_at column
+                if (!['outbound', 'picking'].includes(tableName)) {
+                    sql += ` ORDER BY created_at DESC`;
+                }
+
+                const result = await query(sql, params.length > 0 ? params : undefined);
+                backupData.data[tableName] = result.rows;
+            } else {
+                // Large table - fetch in chunks
+                console.log(`  📊 Large table ${tableName}: fetching ${totalRows} rows in chunks...`);
+
+                const allRows: any[] = [];
+                let offset = 0;
+
+                while (offset < totalRows) {
+                    let sql = `SELECT * FROM ${tableName}`;
+                    const params: any[] = [];
+
+                    if (options.warehouseId &&
+                        ['inbound', 'qc', 'picking', 'outbound', 'racks'].includes(tableName)) {
+                        sql += ` WHERE warehouse_id = $1`;
+                        params.push(options.warehouseId);
+                    }
+
+                    // Add ordering by primary key for consistent pagination
+                    sql += ` ORDER BY id LIMIT ${CHUNK_SIZE} OFFSET ${offset}`;
+
+                    const result = await query(sql, params.length > 0 ? params : undefined);
+                    allRows.push(...result.rows);
+
+                    offset += CHUNK_SIZE;
+                    console.log(`    Progress: ${Math.min(offset, totalRows)}/${totalRows} rows`);
+                }
+
+                backupData.data[tableName] = allRows;
             }
 
-            const result = await query(sql, params.length > 0 ? params : undefined);
-            backupData.data[tableName] = result.rows;
-
-            console.log(`  ✓ Backed up ${tableName}: ${result.rows.length} rows`);
+            console.log(`  ✓ Backed up ${tableName}: ${backupData.data[tableName].length} rows`);
         } catch (error: any) {
             console.warn(`  ⚠️ Could not backup table ${tableName}:`, error.message);
             backupData.data[tableName] = {

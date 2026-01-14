@@ -101,27 +101,12 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
     const whereClause = conditions.join(" AND ");
     const countWhereClause = countConditions.join(" AND ");
 
-    /* OPTIMIZED COUNT QUERY - minimal JOINs */
-    let countSql = '';
-    if (needsMasterJoin) {
-      countSql = `
-        SELECT COUNT(*)
-        FROM inbound i
-        LEFT JOIN master_data m ON m.wsn = i.wsn
-        WHERE ${countWhereClause} ${stageCondition}
-      `;
-    } else {
-      countSql = `
-        SELECT COUNT(*)
-        FROM inbound i
-        WHERE ${countWhereClause} ${stageCondition}
-      `;
-    }
-    const countResult = await query(countSql, countParams);
-    const total = Number(countResult.rows[0].count);
+    /* OPTIMIZED: Run count and ID queries in PARALLEL */
+    const countSql = needsMasterJoin
+      ? `SELECT COUNT(*) FROM inbound i LEFT JOIN master_data m ON m.wsn = i.wsn WHERE ${countWhereClause} ${stageCondition}`
+      : `SELECT COUNT(*) FROM inbound i WHERE ${countWhereClause} ${stageCondition}`;
 
-    /* PHASE 1: Get IDs only (fast) */
-    let idsSql = `
+    const idsSql = `
       SELECT i.id
       FROM inbound i
       ${needsMasterJoin ? 'LEFT JOIN master_data m ON m.wsn = i.wsn' : ''}
@@ -130,7 +115,14 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
     params.push(Number(limit), offset);
-    const idsResult = await query(idsSql, params);
+
+    // Run both queries in parallel
+    const [countResult, idsResult] = await Promise.all([
+      query(countSql, countParams),
+      query(idsSql, params)
+    ]);
+
+    const total = Number(countResult.rows[0].count);
     const ids = idsResult.rows.map((r: any) => r.id);
 
     if (ids.length === 0) {
