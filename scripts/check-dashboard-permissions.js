@@ -1,11 +1,14 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const { Pool } = require('pg');
 
+if (!process.env.DATABASE_URL) {
+    console.error('❌ DATABASE_URL not set. Please configure .env file.');
+    process.exit(1);
+}
+
 const pool = new Pool({
-    host: 'localhost',
-    port: 5432,
-    database: 'wms',
-    user: 'postgres',
-    password: 'root',
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
 });
 
 async function checkDashboardPermissions() {

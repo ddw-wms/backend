@@ -25,7 +25,10 @@ export const initializeDatabase = async (): Promise<Pool> => {
   const
     newPool = new Pool({
       connectionString: dbUrl,
-      ssl: { rejectUnauthorized: false },
+      // SSL configuration - enforce certificate validation in production
+      ssl: process.env.NODE_ENV === 'production'
+        ? { rejectUnauthorized: true }  // Strict SSL in production
+        : { rejectUnauthorized: false }, // Relaxed for development
 
       // MOST IMPORTANT for Supabase/Remote DB:
       keepAlive: true,

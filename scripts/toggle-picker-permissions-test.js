@@ -1,11 +1,21 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 
 const API = process.env.API_URL || 'http://localhost:5000/api';
 
+// IMPORTANT: Set these environment variables before running
+if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
+    console.error('❌ ADMIN_USERNAME and ADMIN_PASSWORD must be set in environment');
+    console.log('   Usage: ADMIN_USERNAME=xxx ADMIN_PASSWORD=xxx node toggle-picker-permissions-test.js');
+    process.exit(1);
+}
+
 async function loginAdmin() {
-    const res = await axios.post(`${API}/auth/login`, { username: 'admin', password: 'admin123' });
+    const res = await axios.post(`${API}/auth/login`, {
+        username: process.env.ADMIN_USERNAME,
+        password: process.env.ADMIN_PASSWORD
+    });
     return res.data.token;
 }
 

@@ -11,6 +11,8 @@ dotenv.config(envPath ? { path: envPath } : undefined);
 
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
 import { initializeDatabase } from './config/database';
 import authRoutes from './routes/auth.routes';
 import warehousesRoutes from './routes/warehouses.routes';
@@ -71,6 +73,22 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Required for some features
+}));
+
+// Response compression for better performance
+app.use(compression());
+
 // 🚧 Ensure DB is ready before hitting any API (skip check in tests)
 app.use((req, res, next) => {
   if (process.env.NODE_ENV === 'test') return next();
@@ -86,8 +104,9 @@ app.use((req, res, next) => {
 // Request timeout (30 seconds for all requests)
 app.use(apiTimeout);
 
-app.use(express.urlencoded({ limit: '200mb', extended: true }));
-app.use(express.json({ limit: '200mb' }));
+// Body parsers with reasonable limits (10MB default, specific routes can have higher)
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Serve Print Agent installer (from Cloudflare R2)
@@ -166,13 +185,35 @@ app.use('/api/sessions', sessionsRoutes);
 
 
 
-// Health Check
-app.get('/api/health', (req: Request, res: Response) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date(),
-    environment: process.env.NODE_ENV || 'development'
-  });
+// Health Check - Enhanced for production monitoring
+app.get('/api/health', async (req: Request, res: Response) => {
+  try {
+    // Check database connectivity
+    const dbStatus = isDbReady() ? 'connected' : 'disconnected';
+
+    // Memory usage
+    const memoryUsage = process.memoryUsage();
+    const memoryMB = {
+      heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+      heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+      rss: Math.round(memoryUsage.rss / 1024 / 1024),
+    };
+
+    res.json({
+      status: dbStatus === 'connected' ? 'OK' : 'DEGRADED',
+      timestamp: new Date(),
+      environment: process.env.NODE_ENV || 'development',
+      database: dbStatus,
+      memory: memoryMB,
+      uptime: Math.round(process.uptime()),
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      timestamp: new Date(),
+      error: 'Health check failed',
+    });
+  }
 });
 
 // 404

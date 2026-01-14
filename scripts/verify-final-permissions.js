@@ -1,12 +1,14 @@
 // Final verification - Show all actual permissions
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const { Pool } = require('pg');
 
+if (!process.env.DATABASE_URL) {
+    console.error('❌ DATABASE_URL not set. Please configure .env file.');
+    process.exit(1);
+}
+
 const pool = new Pool({
-    host: 'aws-1-ap-south-1.pooler.supabase.com',
-    port: 5432,
-    database: 'postgres',
-    user: 'postgres.oycqwsvjmiyfwrmzncso',
-    password: 'Sunita_01639',
+    connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 

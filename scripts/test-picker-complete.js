@@ -1,24 +1,31 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const axios = require('axios');
 
+// Check required environment variables
+if (!process.env.TEST_PICKER_USERNAME || !process.env.TEST_PICKER_PASSWORD) {
+    console.error('❌ TEST_PICKER_USERNAME and TEST_PICKER_PASSWORD must be set');
+    console.log('   Usage: TEST_PICKER_USERNAME=xxx TEST_PICKER_PASSWORD=xxx node test-picker-complete.js');
+    process.exit(1);
+}
+
 (async () => {
-    const API_URL = 'http://localhost:5000';
+    const API_URL = process.env.API_URL || 'http://localhost:5000';
 
     try {
         console.log('\n🔐 Testing Picker User Login and Permissions\n');
         console.log('━'.repeat(60));
 
-        // Login with picker (adjust password if needed)
-        console.log('\n1️⃣  Attempting login as "Panja"...');
+        // Login with picker
+        console.log(`\n1️⃣  Attempting login as "${process.env.TEST_PICKER_USERNAME}"...`);
         const loginResponse = await axios.post(`${API_URL}/api/auth/login`, {
-            username: 'Panja',
-            password: 'Panja'
+            username: process.env.TEST_PICKER_USERNAME,
+            password: process.env.TEST_PICKER_PASSWORD
         }).catch(e => {
             console.log(`   ❌ Login failed: ${e.response?.data?.error || e.message}`);
             console.log('\n   💡 Try these steps:');
             console.log('      1. Login as admin');
             console.log('      2. Go to Users page');
-            console.log('      3. Reset password for "Panja"');
+            console.log('      3. Check user credentials');
             console.log('      4. Then run this test again\n');
             return null;
         });
