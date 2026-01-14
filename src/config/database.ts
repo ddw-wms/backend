@@ -20,6 +20,8 @@ export const initializeDatabase = async (): Promise<Pool> => {
 
   logger.info("Initializing database pool...");
 
+  const isPgBouncer = dbUrl.includes('pgbouncer=true') || dbUrl.includes(':6543');
+
   const
     newPool = new Pool({
       connectionString: dbUrl,
@@ -29,17 +31,19 @@ export const initializeDatabase = async (): Promise<Pool> => {
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
 
-      // Pool configuration - OPTIMIZED for Supabase FREE TIER with Transaction Mode (port 6543)
-      // Transaction mode allows better connection sharing
-      max: 10,   // Can use more connections with transaction mode
-      min: 1,    // Keep only 1 minimum connection alive  
-      idleTimeoutMillis: 20000,  // Release idle connections in 20 seconds
+      // Pool configuration - OPTIMIZED for Supabase FREE TIER
+      max: isPgBouncer ? 3 : 5,   // Fewer connections for PgBouncer/Transaction mode
+      min: 0,    // Don't keep any minimum connections (let PgBouncer manage)
+      idleTimeoutMillis: 5000,   // Release idle connections very quickly (5 seconds)
       connectionTimeoutMillis: 30000,  // 30 seconds to connect
       allowExitOnIdle: true,  // Release all connections when idle
 
-      // Query timeouts - increased for large data operations
-      statement_timeout: 120000,  // 2 minutes max per statement (for backup/restore)
-      query_timeout: 180000,      // 3 minutes max per query (for large exports)
+      // CRITICAL for Supabase Transaction Mode (PgBouncer)
+      // Disable prepared statements - they don't work with PgBouncer transaction mode
+      ...(isPgBouncer && {
+        statement_timeout: undefined,
+        query_timeout: undefined,
+      }),
     });
 
   // test connection before assigning
