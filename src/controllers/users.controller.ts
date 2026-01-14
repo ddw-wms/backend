@@ -3,6 +3,25 @@ import { Request, Response } from 'express';
 import { query } from '../config/database';
 import { hashPassword } from '../utils/helpers';
 
+// Helper to log errors to error_logs table
+const logErrorToDb = async (message: string, endpoint: string, method: string, username: string, stackTrace: string) => {
+  try {
+    await query(
+      `INSERT INTO error_logs (message, endpoint, method, username, stack_trace) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        message.substring(0, 500),
+        endpoint,
+        method,
+        username,
+        stackTrace.substring(0, 2000)
+      ]
+    );
+  } catch {
+    // Silent fail - don't break app if logging fails
+  }
+};
+
 export const getUsers = async (req: Request, res: Response) => {
   try {
     const result = await query(
@@ -64,6 +83,11 @@ export const updateUser = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Cannot change Super Admin role' });
     }
 
+    // Convert empty strings to null to avoid unique constraint issues
+    const sanitizedEmail = email && email.trim() !== '' ? email.trim() : null;
+    const sanitizedFullName = full_name && full_name.trim() !== '' ? full_name.trim() : null;
+    const sanitizedPhone = phone && phone.trim() !== '' ? phone.trim() : null;
+
     const result = await query(
       `UPDATE users
        SET email = COALESCE($1, email),
@@ -73,7 +97,7 @@ export const updateUser = async (req: Request, res: Response) => {
            is_active = COALESCE($5, is_active)
        WHERE id = $6
        RETURNING *`,
-      [email, full_name, phone, role, is_active, id]
+      [sanitizedEmail, sanitizedFullName, sanitizedPhone, role, is_active, id]
     );
 
     if (result.rows.length === 0) {
@@ -82,7 +106,19 @@ export const updateUser = async (req: Request, res: Response) => {
 
     res.json(result.rows[0]);
   } catch (error: any) {
-    res.status(500).json({ error: 'Failed to update user' });
+    console.error('Update user error:', error);
+
+    // Log error to database
+    const currentUser = req.user;
+    logErrorToDb(
+      error.message || 'Update user failed',
+      `/users/${req.params.id}`,
+      'PUT',
+      currentUser?.username || 'anonymous',
+      error.stack || ''
+    );
+
+    res.status(500).json({ error: error.message || 'Failed to update user' });
   }
 };
 
