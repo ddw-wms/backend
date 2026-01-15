@@ -73,17 +73,11 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Security middleware
+// Security middleware - configured to work with CORS
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "blob:"],
-    },
-  },
-  crossOriginEmbedderPolicy: false, // Required for some features
+  contentSecurityPolicy: false, // Disable CSP as it conflicts with cross-origin API calls
+  crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow cross-origin resource sharing
+  crossOriginEmbedderPolicy: false, // Required for cross-origin requests
 }));
 
 // Response compression for better performance
