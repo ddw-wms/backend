@@ -93,9 +93,11 @@ app.use(cors({
 // Response compression for better performance
 app.use(compression());
 
-// 🚧 Ensure DB is ready before hitting any API (skip check in tests)
+// 🚧 Ensure DB is ready before hitting any API (skip check in tests and health endpoints)
 app.use((req, res, next) => {
   if (process.env.NODE_ENV === 'test') return next();
+  // Skip DB check for health endpoint (used for wake-up pings)
+  if (req.path === '/api/health') return next();
   if (!isDbReady()) {
     return res.status(503).json({
       error: "Database not ready. Reconnecting...",
