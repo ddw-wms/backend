@@ -620,19 +620,29 @@ async function processRestoreAsync(
             backupProgress.set(restoreId, {
                 status: 'in_progress',
                 progress: 10,
-                message: `Found ${tables.length} tables, starting restore...`
+                message: `Found ${tables.length} tables, starting FAST restore...`
             });
 
             const restoreResults: any = { success: [], failed: [], skipped: [] };
             let totalProcessedRows = 0;
-            const BATCH_SIZE = 200; // Smaller batches for memory efficiency
+
+            // ULTRA-FAST: Larger batches (memory vs speed tradeoff)
+            const BATCH_SIZE = 1000; // 1000 rows per INSERT for speed
+
+            // SPEED BOOST: Disable triggers during restore
+            try {
+                await query('SET session_replication_role = replica');
+                console.log('⚡ Triggers disabled for faster restore');
+            } catch (e) {
+                console.log('⚠️ Could not disable triggers (non-critical)');
+            }
 
             // Process each table one at a time using streaming
             for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
                 const tableName = tables[tableIndex];
 
                 try {
-                    console.log(`  🔄 Streaming restore for: ${tableName}`);
+                    console.log(`  🚀 FAST restore for: ${tableName}`);
 
                     backupProgress.set(restoreId, {
                         status: 'in_progress',
@@ -655,14 +665,19 @@ async function processRestoreAsync(
                         continue;
                     }
 
-                    // Clear existing data
-                    await query(`DELETE FROM ${tableName}`);
+                    // FAST: Use TRUNCATE instead of DELETE (much faster, resets sequences)
+                    try {
+                        await query(`TRUNCATE TABLE ${tableName} CASCADE`);
+                    } catch {
+                        // Fallback to DELETE if TRUNCATE fails (permissions)
+                        await query(`DELETE FROM ${tableName}`);
+                    }
 
                     // Get columns from first row
                     const columns = Object.keys(tableRows[0]);
                     let insertedCount = 0;
 
-                    // Insert in batches
+                    // SPEED: Insert in larger batches with less frequent updates
                     for (let i = 0; i < tableRows.length; i += BATCH_SIZE) {
                         const batch = tableRows.slice(i, Math.min(i + BATCH_SIZE, tableRows.length));
 
@@ -691,7 +706,8 @@ async function processRestoreAsync(
                             insertedCount += batch.length;
 
                         } catch (batchError: any) {
-                            // Fallback to individual inserts
+                            // Fallback to individual inserts only if bulk fails
+                            console.warn(`    ⚠️ Bulk insert failed, using fallback...`);
                             for (const row of batch) {
                                 try {
                                     const rowValues = columns.map(col => row[col]);
@@ -705,26 +721,27 @@ async function processRestoreAsync(
                             }
                         }
 
-                        // Update progress
-                        backupProgress.set(restoreId, {
-                            status: 'in_progress',
-                            progress: 10 + Math.round(((tableIndex + (i / tableRows.length)) / tables.length) * 80),
-                            message: `Restoring ${tableName}: ${insertedCount}/${tableRows.length} rows`,
-                            details: {
-                                currentTable: tableName,
-                                tableProgress: Math.round((insertedCount / tableRows.length) * 100),
-                                completedTables: tableIndex,
-                                totalTables: tables.length,
-                                processedRows: totalProcessedRows + insertedCount
-                            }
-                        });
+                        // SPEED: Update progress less frequently (every 5000 rows)
+                        if (i % 5000 === 0 || i + BATCH_SIZE >= tableRows.length) {
+                            backupProgress.set(restoreId, {
+                                status: 'in_progress',
+                                progress: 10 + Math.round(((tableIndex + (i / tableRows.length)) / tables.length) * 80),
+                                message: `Restoring ${tableName}: ${insertedCount}/${tableRows.length} rows`,
+                                details: {
+                                    currentTable: tableName,
+                                    tableProgress: Math.round((insertedCount / tableRows.length) * 100),
+                                    completedTables: tableIndex,
+                                    totalTables: tables.length,
+                                    processedRows: totalProcessedRows + insertedCount
+                                }
+                            });
+                        }
 
-                        // Allow event loop to breathe
-                        await new Promise(resolve => setImmediate(resolve));
+                        // SPEED: Breathe less frequently (every 10000 rows)
+                        if (i % 10000 === 0) {
+                            await new Promise(resolve => setImmediate(resolve));
+                        }
                     }
-
-                    // Force garbage collection hint
-                    if (global.gc) global.gc();
 
                     console.log(`  ✅ Restored ${tableName}: ${insertedCount} rows`);
                     restoreResults.success.push({ table: tableName, rows: insertedCount });
@@ -734,6 +751,14 @@ async function processRestoreAsync(
                     console.warn(`  ⚠️ Failed to restore ${tableName}:`, tableError.message);
                     restoreResults.failed.push({ table: tableName, error: tableError.message });
                 }
+            }
+
+            // SPEED BOOST: Re-enable triggers
+            try {
+                await query('SET session_replication_role = DEFAULT');
+                console.log('⚡ Triggers re-enabled');
+            } catch (e) {
+                console.log('⚠️ Could not re-enable triggers');
             }
 
             // Log restore action
