@@ -11,7 +11,6 @@ dotenv.config(envPath ? { path: envPath } : undefined);
 
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
-import helmet from 'helmet';
 import compression from 'compression';
 import { initializeDatabase } from './config/database';
 import authRoutes from './routes/auth.routes';
@@ -65,19 +64,27 @@ const getAllowedOrigins = (): string[] => {
   ];
 };
 
-// CORS (MUST BE FIRST)
+// Handle OPTIONS preflight requests FIRST (before any other middleware)
+app.options('*', (req, res) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = getAllowedOrigins();
+
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+  res.status(204).end();
+});
+
+// CORS middleware
 app.use(cors({
   origin: getAllowedOrigins(),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-
-// Security middleware - configured to work with CORS
-app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP as it conflicts with cross-origin API calls
-  crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow cross-origin resource sharing
-  crossOriginEmbedderPolicy: false, // Required for cross-origin requests
 }));
 
 // Response compression for better performance
