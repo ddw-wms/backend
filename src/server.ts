@@ -50,18 +50,14 @@ const getAllowedOrigins = (): string[] => {
   if (envOrigins) {
     return envOrigins.split(',').map(origin => origin.trim());
   }
-  // Default origins for development
-  if (process.env.NODE_ENV === 'production') {
-    return [
-      'https://ddwms.vercel.app',
-      process.env.FRONTEND_URL || ''
-    ].filter(Boolean);
-  }
+  // Default origins - include both production and development
   return [
+    'https://ddwms.vercel.app',
+    process.env.FRONTEND_URL || '',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:9100'
-  ];
+  ].filter(Boolean);
 };
 
 // Handle OPTIONS preflight requests FIRST (before any other middleware)
