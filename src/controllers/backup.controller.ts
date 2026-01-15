@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { createJSONBackup, exportTableAsCSV, getDatabaseStatistics } from '../utils/supabaseBackup';
 import { backupScheduler } from '../services/backupScheduler';
 import { uploadToR2, deleteFromR2, isR2Configured } from '../services/cloudflareR2';
+import readline from 'readline';
 
 const execPromise = promisify(exec);
 
@@ -568,7 +569,7 @@ export const restoreBackup = async (req: Request, res: Response) => {
     }
 };
 
-// Async restore processor with progress tracking
+// Async restore processor with progress tracking - MEMORY EFFICIENT STREAMING VERSION
 async function processRestoreAsync(
     restoreId: string,
     backupId: string,
@@ -576,125 +577,121 @@ async function processRestoreAsync(
     filePath: string
 ) {
     try {
-        console.log('🔄 Starting async database restore...');
+        console.log('🔄 Starting STREAMING database restore (memory-efficient)...');
 
         backupProgress.set(restoreId, {
             status: 'in_progress',
             progress: 5,
-            message: 'Reading backup file...'
+            message: 'Analyzing backup file...'
         });
 
         // Check if it's a JSON backup
         if (backup.backup_type === 'json' || filePath.endsWith('.json')) {
-            // Read file in chunks for large files
-            const fileContent = fs.readFileSync(filePath, 'utf8');
-            const backupData = JSON.parse(fileContent);
+
+            // Get file size to estimate progress
+            const fileStats = fs.statSync(filePath);
+            const fileSizeMB = (fileStats.size / (1024 * 1024)).toFixed(2);
+            console.log(`📦 Backup file size: ${fileSizeMB} MB`);
+
+            // MEMORY-EFFICIENT: Parse JSON structure first (just metadata)
+            // Read only the first few KB to get table names
+            const fd = fs.openSync(filePath, 'r');
+            const headerBuffer = Buffer.alloc(4096);
+            fs.readSync(fd, headerBuffer, 0, 4096, 0);
+            fs.closeSync(fd);
+
+            // Extract table names from metadata section
+            const headerText = headerBuffer.toString('utf8');
+            const tablesMatch = headerText.match(/"tables"\s*:\s*\[(.*?)\]/s);
+            let tables: string[] = [];
+
+            if (tablesMatch) {
+                try {
+                    tables = JSON.parse(`[${tablesMatch[1]}]`);
+                } catch {
+                    tables = ['warehouses', 'customers', 'racks', 'master_data', 'inbound', 'qc', 'picking', 'outbound'];
+                }
+            } else {
+                tables = ['warehouses', 'customers', 'racks', 'master_data', 'inbound', 'qc', 'picking', 'outbound'];
+            }
+
+            console.log(`📋 Tables to restore: ${tables.join(', ')}`);
 
             backupProgress.set(restoreId, {
                 status: 'in_progress',
                 progress: 10,
-                message: 'Backup file loaded, preparing restore...'
+                message: `Found ${tables.length} tables, starting restore...`
             });
 
-            const tables = Object.keys(backupData.data).filter(t => {
-                const data = backupData.data[t];
-                return Array.isArray(data) && data.length > 0;
-            });
-
-            const totalTables = tables.length;
-            let completedTables = 0;
             const restoreResults: any = { success: [], failed: [], skipped: [] };
+            let totalProcessedRows = 0;
+            const BATCH_SIZE = 200; // Smaller batches for memory efficiency
 
-            // ULTRA-FAST: Much larger batch with bulk INSERT
-            const BATCH_SIZE = 500; // 500 rows per single INSERT query
+            // Process each table one at a time using streaming
+            for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
+                const tableName = tables[tableIndex];
 
-            // Calculate total rows for progress
-            let totalRows = 0;
-            let processedRows = 0;
-            for (const tableName of tables) {
-                totalRows += backupData.data[tableName].length;
-            }
-
-            console.log(`📦 FAST Restoring ${totalTables} tables with ${totalRows} total rows...`);
-
-            // Restore each table
-            for (const tableName of tables) {
                 try {
-                    const tableData = backupData.data[tableName];
+                    console.log(`  🔄 Streaming restore for: ${tableName}`);
 
                     backupProgress.set(restoreId, {
                         status: 'in_progress',
-                        progress: 10 + Math.round((completedTables / totalTables) * 80),
-                        message: `Restoring ${tableName} (${tableData.length} rows)...`,
+                        progress: 10 + Math.round((tableIndex / tables.length) * 80),
+                        message: `Restoring ${tableName}...`,
                         details: {
                             currentTable: tableName,
-                            completedTables,
-                            totalTables,
-                            processedRows,
-                            totalRows
+                            completedTables: tableIndex,
+                            totalTables: tables.length,
+                            processedRows: totalProcessedRows
                         }
                     });
 
-                    console.log(`  🔄 Restoring ${tableName} (${tableData.length} rows)...`);
+                    // Stream parse this specific table's data
+                    const tableRows = await streamParseTableData(filePath, tableName);
+
+                    if (tableRows.length === 0) {
+                        console.log(`    ⏭️ Skipping ${tableName}: no data`);
+                        restoreResults.skipped.push({ table: tableName, reason: 'no data' });
+                        continue;
+                    }
 
                     // Clear existing data
                     await query(`DELETE FROM ${tableName}`);
 
-                    // Get column names from first row
-                    if (tableData.length === 0) continue;
-                    const columns = Object.keys(tableData[0]);
-
-                    // ULTRA-FAST: Bulk INSERT with multiple VALUES in single query
+                    // Get columns from first row
+                    const columns = Object.keys(tableRows[0]);
                     let insertedCount = 0;
-                    for (let i = 0; i < tableData.length; i += BATCH_SIZE) {
-                        const batch = tableData.slice(i, i + BATCH_SIZE);
 
-                        // Build multi-value INSERT: INSERT INTO t (a,b) VALUES ($1,$2), ($3,$4), ...
-                        const values: any[] = [];
-                        const valueRows: string[] = [];
-                        let paramIndex = 1;
-
-                        for (const row of batch) {
-                            const rowPlaceholders: string[] = [];
-                            for (const col of columns) {
-                                values.push(row[col]);
-                                rowPlaceholders.push(`$${paramIndex++}`);
-                            }
-                            valueRows.push(`(${rowPlaceholders.join(', ')})`);
-                        }
-
-                        // Single INSERT with all rows - MUCH faster than row-by-row!
-                        const bulkSQL = `
-                            INSERT INTO ${tableName} (${columns.join(', ')})
-                            VALUES ${valueRows.join(', ')}
-                            ON CONFLICT DO NOTHING
-                        `;
+                    // Insert in batches
+                    for (let i = 0; i < tableRows.length; i += BATCH_SIZE) {
+                        const batch = tableRows.slice(i, Math.min(i + BATCH_SIZE, tableRows.length));
 
                         try {
+                            // Build bulk INSERT
+                            const values: any[] = [];
+                            const valueRows: string[] = [];
+                            let paramIndex = 1;
+
+                            for (const row of batch) {
+                                const rowPlaceholders: string[] = [];
+                                for (const col of columns) {
+                                    values.push(row[col]);
+                                    rowPlaceholders.push(`$${paramIndex++}`);
+                                }
+                                valueRows.push(`(${rowPlaceholders.join(', ')})`);
+                            }
+
+                            const bulkSQL = `
+                                INSERT INTO ${tableName} (${columns.join(', ')})
+                                VALUES ${valueRows.join(', ')}
+                                ON CONFLICT DO NOTHING
+                            `;
+
                             await query(bulkSQL, values);
                             insertedCount += batch.length;
-                            processedRows += batch.length;
-
-                            // Update progress every batch
-                            const overallProgress = 10 + Math.round((processedRows / totalRows) * 80);
-                            backupProgress.set(restoreId, {
-                                status: 'in_progress',
-                                progress: overallProgress,
-                                message: `Restoring ${tableName}: ${insertedCount}/${tableData.length} rows`,
-                                details: {
-                                    currentTable: tableName,
-                                    tableProgress: Math.round((insertedCount / tableData.length) * 100),
-                                    completedTables,
-                                    totalTables,
-                                    processedRows,
-                                    totalRows
-                                }
-                            });
 
                         } catch (batchError: any) {
-                            console.warn(`    ⚠️ Bulk insert error at row ${i}, falling back to individual inserts:`, batchError.message);
-
-                            // Fallback: Insert rows individually on error (handles constraint issues)
+                            // Fallback to individual inserts
                             for (const row of batch) {
                                 try {
                                     const rowValues = columns.map(col => row[col]);
@@ -704,35 +701,48 @@ async function processRestoreAsync(
                                         rowValues
                                     );
                                     insertedCount++;
-                                    processedRows++;
-                                } catch (rowError) {
-                                    // Skip failed rows
-                                }
+                                } catch { /* skip failed rows */ }
                             }
                         }
 
-                        // Allow event loop to breathe (less frequently now)
-                        if (i % 2000 === 0) {
-                            await new Promise(resolve => setImmediate(resolve));
-                        }
+                        // Update progress
+                        backupProgress.set(restoreId, {
+                            status: 'in_progress',
+                            progress: 10 + Math.round(((tableIndex + (i / tableRows.length)) / tables.length) * 80),
+                            message: `Restoring ${tableName}: ${insertedCount}/${tableRows.length} rows`,
+                            details: {
+                                currentTable: tableName,
+                                tableProgress: Math.round((insertedCount / tableRows.length) * 100),
+                                completedTables: tableIndex,
+                                totalTables: tables.length,
+                                processedRows: totalProcessedRows + insertedCount
+                            }
+                        });
+
+                        // Allow event loop to breathe
+                        await new Promise(resolve => setImmediate(resolve));
                     }
+
+                    // Force garbage collection hint
+                    if (global.gc) global.gc();
 
                     console.log(`  ✅ Restored ${tableName}: ${insertedCount} rows`);
                     restoreResults.success.push({ table: tableName, rows: insertedCount });
-                    completedTables++;
+                    totalProcessedRows += insertedCount;
 
-                } catch (err: any) {
-                    console.warn(`  ⚠️ Failed to restore ${tableName}:`, err.message);
-                    restoreResults.failed.push({ table: tableName, error: err.message });
-                    completedTables++;
+                } catch (tableError: any) {
+                    console.warn(`  ⚠️ Failed to restore ${tableName}:`, tableError.message);
+                    restoreResults.failed.push({ table: tableName, error: tableError.message });
                 }
             }
 
             // Log restore action
-            await query(
-                `INSERT INTO backup_restore_logs (backup_id, action, status, message) VALUES ($1, $2, $3, $4)`,
-                [backupId, 'restore', 'success', `Restored: ${restoreResults.success.length} tables, ${processedRows} rows`]
-            );
+            try {
+                await query(
+                    `INSERT INTO backup_restore_logs (backup_id, action, status, message) VALUES ($1, $2, $3, $4)`,
+                    [backupId, 'restore', 'success', `Restored: ${restoreResults.success.length} tables, ${totalProcessedRows} rows`]
+                );
+            } catch { /* ignore logging errors */ }
 
             backupProgress.set(restoreId, {
                 status: 'completed',
@@ -742,15 +752,14 @@ async function processRestoreAsync(
                     success: restoreResults.success,
                     failed: restoreResults.failed,
                     skipped: restoreResults.skipped,
-                    totalRows: processedRows,
+                    totalRows: totalProcessedRows,
                     fileName: backup.file_name
                 }
             });
 
-            console.log(`✅ Async restore completed: ${restoreResults.success.length} tables, ${processedRows} rows`);
+            console.log(`✅ Streaming restore completed: ${restoreResults.success.length} tables, ${totalProcessedRows} rows`);
 
         } else {
-            // SQL restore not supported in async mode
             backupProgress.set(restoreId, {
                 status: 'failed',
                 progress: 0,
@@ -762,17 +771,14 @@ async function processRestoreAsync(
         setTimeout(() => backupProgress.delete(restoreId), 10 * 60 * 1000);
 
     } catch (error: any) {
-        console.error('❌ Async restore error:', error);
+        console.error('❌ Streaming restore error:', error);
 
-        // Log failed restore
         try {
             await query(
                 `INSERT INTO backup_restore_logs (backup_id, action, status, message) VALUES ($1, $2, $3, $4)`,
                 [backupId, 'restore', 'failed', error.message]
             );
-        } catch (logError) {
-            console.error('Failed to log restore error:', logError);
-        }
+        } catch { /* ignore */ }
 
         backupProgress.set(restoreId, {
             status: 'failed',
@@ -780,6 +786,106 @@ async function processRestoreAsync(
             message: `Restore failed: ${error.message}`
         });
     }
+}
+
+// Stream parse a specific table's data from backup file - MEMORY EFFICIENT
+// Uses line-by-line parsing to extract table data without loading entire file
+async function streamParseTableData(filePath: string, tableName: string): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+        const rows: any[] = [];
+        let buffer = '';
+        let inTargetTable = false;
+        let foundStart = false;
+
+        const readStream = fs.createReadStream(filePath, {
+            encoding: 'utf8',
+            highWaterMark: 128 * 1024 // 128KB chunks
+        });
+
+        readStream.on('data', (chunk: Buffer | string) => {
+            const chunkStr = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+            buffer += chunkStr;
+
+            // Look for our table's start
+            if (!foundStart) {
+                const tableStart = buffer.indexOf(`"${tableName}": [`);
+                if (tableStart !== -1) {
+                    foundStart = true;
+                    inTargetTable = true;
+                    buffer = buffer.substring(tableStart + tableName.length + 4); // Skip to after opening [
+                }
+            }
+
+            if (inTargetTable) {
+                // Parse JSON objects from buffer
+                let i = 0;
+                while (i < buffer.length) {
+                    const char = buffer[i];
+
+                    if (char === '{') {
+                        // Find matching closing brace
+                        let braceCount = 1;
+                        let j = i + 1;
+                        while (j < buffer.length && braceCount > 0) {
+                            if (buffer[j] === '{') braceCount++;
+                            else if (buffer[j] === '}') braceCount--;
+                            j++;
+                        }
+
+                        if (braceCount === 0) {
+                            // Found complete object
+                            const objStr = buffer.substring(i, j);
+                            try {
+                                const obj = JSON.parse(objStr);
+                                rows.push(obj);
+                            } catch (e) {
+                                // Skip malformed objects
+                            }
+                            i = j;
+                            continue;
+                        } else {
+                            // Incomplete object - wait for more data
+                            buffer = buffer.substring(i);
+                            break;
+                        }
+                    } else if (char === ']') {
+                        // End of array - we're done with this table
+                        inTargetTable = false;
+                        readStream.destroy();
+                        resolve(rows);
+                        return;
+                    }
+                    i++;
+                }
+
+                // Keep only unparsed data in buffer
+                if (inTargetTable && buffer.length > 0) {
+                    // Find last complete object position
+                    const lastBrace = buffer.lastIndexOf('}');
+                    if (lastBrace > 0) {
+                        buffer = buffer.substring(lastBrace + 1);
+                    }
+                }
+            }
+
+            // Memory safety - if buffer too large and not in target, clear it
+            if (!inTargetTable && buffer.length > 1024 * 1024) {
+                buffer = buffer.substring(buffer.length - 10000); // Keep last 10KB for context
+            }
+        });
+
+        readStream.on('end', () => {
+            resolve(rows);
+        });
+
+        readStream.on('error', (err) => {
+            reject(err);
+        });
+
+        readStream.on('close', () => {
+            resolve(rows);
+        });
+    });
 }
 
 // ================= GET RESTORE LOGS =================
