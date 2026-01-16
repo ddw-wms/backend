@@ -6,7 +6,8 @@ import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import fs from 'fs';
 
-// Simple in-memory cache for count queries (reduces DB round trips)
+// ⚡ OPTIMIZED: LRU-style in-memory cache for count queries with size limit
+const MAX_CACHE_SIZE = 500; // Prevent unbounded memory growth
 const countCache = new Map<string, { count: number; timestamp: number }>();
 const COUNT_CACHE_TTL = 5000; // 5 seconds TTL - balances freshness with speed
 
@@ -15,12 +16,33 @@ function getCachedCount(key: string): number | null {
   if (cached && Date.now() - cached.timestamp < COUNT_CACHE_TTL) {
     return cached.count;
   }
+  // Clean up expired entry
+  if (cached) {
+    countCache.delete(key);
+  }
   return null;
 }
 
 function setCachedCount(key: string, count: number): void {
+  // ⚡ LRU eviction: Remove oldest entries when cache is full
+  if (countCache.size >= MAX_CACHE_SIZE) {
+    // Delete first 10% of entries (oldest due to Map insertion order)
+    const deleteCount = Math.floor(MAX_CACHE_SIZE * 0.1);
+    const keysToDelete = Array.from(countCache.keys()).slice(0, deleteCount);
+    keysToDelete.forEach(k => countCache.delete(k));
+  }
   countCache.set(key, { count, timestamp: Date.now() });
 }
+
+// ⚡ Periodic cache cleanup (every 60 seconds)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of countCache.entries()) {
+    if (now - value.timestamp > COUNT_CACHE_TTL * 2) {
+      countCache.delete(key);
+    }
+  }
+}, 60000);
 
 // SINGLE ENTRY 
 export const createInboundEntry = async (req: Request, res: Response) => {

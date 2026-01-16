@@ -5,10 +5,11 @@ import * as XLSX from 'xlsx';
 
 // =================== INVENTORY REPORTS ===================
 
-// Current Stock Report
+// Current Stock Report - ⚡ OPTIMIZED with pagination
 export const getCurrentStockReport = async (req: Request, res: Response) => {
     try {
-        const { warehouse_id, brand, category } = req.query;
+        const { warehouse_id, brand, category, page = 1, limit = 1000 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
 
         let whereConditions: string[] = ['1=1'];
         const params: any[] = [];
@@ -34,6 +35,7 @@ export const getCurrentStockReport = async (req: Request, res: Response) => {
 
         const whereClause = whereConditions.join(' AND ');
 
+        // ⚡ OPTIMIZED: Add LIMIT and OFFSET for pagination
         const sql = `
       SELECT 
         i.wsn,
@@ -57,20 +59,44 @@ export const getCurrentStockReport = async (req: Request, res: Response) => {
       LEFT JOIN master_data m ON i.wsn = m.wsn
       WHERE ${whereClause}
       ORDER BY i.inbound_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+        params.push(Number(limit), offset);
+
+        // Get total count for pagination info
+        const countParams = params.slice(0, -2);
+        const countSql = `
+      SELECT COUNT(*) as total
+      FROM inbound i
+      LEFT JOIN master_data m ON i.wsn = m.wsn
+      WHERE ${whereClause}
     `;
 
-        const result = await query(sql, params);
-        res.json({ data: result.rows, total: result.rows.length });
+        const [result, countResult] = await Promise.all([
+            query(sql, params),
+            query(countSql, countParams)
+        ]);
+
+        const total = parseInt(countResult.rows[0]?.total || '0');
+
+        res.json({
+            data: result.rows,
+            total,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil(total / Number(limit))
+        });
     } catch (error: any) {
         console.error('❌ Current stock report error:', error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// Stock Movement Report
+// Stock Movement Report - ⚡ OPTIMIZED with pagination
 export const getStockMovementReport = async (req: Request, res: Response) => {
     try {
-        const { warehouse_id, wsn, start_date, end_date } = req.query;
+        const { warehouse_id, wsn, start_date, end_date, page = 1, limit = 1000 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
 
         let whereConditions: string[] = ['1=1'];
         const params: any[] = [];
@@ -101,8 +127,10 @@ export const getStockMovementReport = async (req: Request, res: Response) => {
             dateFilterPicking = `AND picking_date BETWEEN $${paramIndex}::date AND $${paramIndex + 1}::date`;
             dateFilterOutbound = `AND dispatch_date BETWEEN $${paramIndex}::date AND $${paramIndex + 1}::date`;
             params.push(start_date, end_date);
+            paramIndex += 2;
         }
 
+        // ⚡ OPTIMIZED: Add LIMIT and OFFSET for pagination
         const sql = `
       SELECT * FROM (
         SELECT wsn, warehouse_id, 'INBOUND' as movement_type, inbound_date as movement_date, inbound_date as sort_date, created_user_name as user_name
@@ -118,10 +146,38 @@ export const getStockMovementReport = async (req: Request, res: Response) => {
         FROM outbound WHERE ${whereClause} ${dateFilterOutbound}
       ) movements
       ORDER BY sort_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+        params.push(Number(limit), offset);
+
+        // Get total count (without LIMIT for pagination info)
+        const countParams = params.slice(0, -2); // Remove limit and offset
+        const countSql = `
+      SELECT COUNT(*) as total FROM (
+        SELECT wsn FROM inbound WHERE ${whereClause} ${dateFilterInbound}
+        UNION ALL
+        SELECT wsn FROM qc WHERE ${whereClause} ${dateFilterQC}
+        UNION ALL
+        SELECT wsn FROM picking WHERE ${whereClause} ${dateFilterPicking}
+        UNION ALL
+        SELECT wsn FROM outbound WHERE ${whereClause} ${dateFilterOutbound}
+      ) movements
     `;
 
-        const result = await query(sql, params);
-        res.json({ data: result.rows, total: result.rows.length });
+        const [result, countResult] = await Promise.all([
+            query(sql, params),
+            query(countSql, countParams)
+        ]);
+
+        const total = parseInt(countResult.rows[0]?.total || '0');
+
+        res.json({
+            data: result.rows,
+            total,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil(total / Number(limit))
+        });
     } catch (error: any) {
         console.error('❌ Stock movement report error:', error);
         res.status(500).json({ error: error.message });
@@ -130,9 +186,11 @@ export const getStockMovementReport = async (req: Request, res: Response) => {
 
 // =================== INBOUND REPORTS ===================
 
+// ⚡ OPTIMIZED with pagination
 export const getInboundReport = async (req: Request, res: Response) => {
     try {
-        const { warehouse_id, start_date, end_date, brand, category } = req.query;
+        const { warehouse_id, start_date, end_date, brand, category, page = 1, limit = 1000 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
 
         let whereConditions: string[] = ['1=1'];
         const params: any[] = [];
@@ -170,6 +228,7 @@ export const getInboundReport = async (req: Request, res: Response) => {
 
         const whereClause = whereConditions.join(' AND ');
 
+        // ⚡ OPTIMIZED: Add LIMIT and OFFSET for pagination
         const sql = `
       SELECT 
         i.*,
@@ -184,11 +243,12 @@ export const getInboundReport = async (req: Request, res: Response) => {
       LEFT JOIN master_data m ON i.wsn = m.wsn
       WHERE ${whereClause}
       ORDER BY i.inbound_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
+        params.push(Number(limit), offset);
 
-        const result = await query(sql, params);
-
-        // Summary stats
+        // Summary stats (without pagination)
+        const countParams = params.slice(0, -2);
         const statsSql = `
       SELECT 
         COUNT(*) as total_inbound,
@@ -200,12 +260,20 @@ export const getInboundReport = async (req: Request, res: Response) => {
       WHERE ${whereClause}
     `;
 
-        const statsResult = await query(statsSql, params);
+        const [result, statsResult] = await Promise.all([
+            query(sql, params),
+            query(statsSql, countParams)
+        ]);
+
+        const total = parseInt(statsResult.rows[0]?.total_inbound || '0');
 
         res.json({
             data: result.rows,
             summary: statsResult.rows[0],
-            total: result.rows.length
+            total,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil(total / Number(limit))
         });
     } catch (error: any) {
         console.error('❌ Inbound report error:', error);
@@ -215,9 +283,11 @@ export const getInboundReport = async (req: Request, res: Response) => {
 
 // =================== OUTBOUND REPORTS ===================
 
+// ⚡ OPTIMIZED with pagination
 export const getOutboundReport = async (req: Request, res: Response) => {
     try {
-        const { warehouse_id, start_date, end_date, customer, source } = req.query;
+        const { warehouse_id, start_date, end_date, customer, source, page = 1, limit = 1000 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
 
         let whereConditions: string[] = ['1=1'];
         const params: any[] = [];
@@ -255,6 +325,7 @@ export const getOutboundReport = async (req: Request, res: Response) => {
 
         const whereClause = whereConditions.join(' AND ');
 
+        // ⚡ OPTIMIZED: Add LIMIT and OFFSET for pagination
         const sql = `
       SELECT 
         o.*,
@@ -269,11 +340,28 @@ export const getOutboundReport = async (req: Request, res: Response) => {
       LEFT JOIN master_data m ON o.wsn = m.wsn
       WHERE ${whereClause}
       ORDER BY o.dispatch_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
+        params.push(Number(limit), offset);
 
-        const result = await query(sql, params);
+        // Get total count for pagination
+        const countParams = params.slice(0, -2);
+        const countSql = `SELECT COUNT(*) as total FROM outbound o WHERE ${whereClause}`;
 
-        res.json({ data: result.rows, total: result.rows.length });
+        const [result, countResult] = await Promise.all([
+            query(sql, params),
+            query(countSql, countParams)
+        ]);
+
+        const total = parseInt(countResult.rows[0]?.total || '0');
+
+        res.json({
+            data: result.rows,
+            total,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil(total / Number(limit))
+        });
     } catch (error: any) {
         console.error('❌ Outbound report error:', error);
         res.status(500).json({ error: error.message });
@@ -282,9 +370,11 @@ export const getOutboundReport = async (req: Request, res: Response) => {
 
 // =================== QC REPORTS ===================
 
+// ⚡ OPTIMIZED with pagination
 export const getQCReport = async (req: Request, res: Response) => {
     try {
-        const { warehouse_id, start_date, end_date, qc_grade, qc_status } = req.query;
+        const { warehouse_id, start_date, end_date, qc_grade, qc_status, page = 1, limit = 1000 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
 
         let whereConditions: string[] = ['1=1'];
         const params: any[] = [];
@@ -322,6 +412,7 @@ export const getQCReport = async (req: Request, res: Response) => {
 
         const whereClause = whereConditions.join(' AND ');
 
+        // ⚡ OPTIMIZED: Add LIMIT and OFFSET for pagination
         const sql = `
       SELECT 
         q.*,
@@ -334,11 +425,12 @@ export const getQCReport = async (req: Request, res: Response) => {
       LEFT JOIN master_data m ON q.wsn = m.wsn
       WHERE ${whereClause}
       ORDER BY q.qc_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
+        params.push(Number(limit), offset);
 
-        const result = await query(sql, params);
-
-        // QC Summary
+        // Get count and summary (without pagination limits)
+        const countParams = params.slice(0, -2);
         const summarySql = `
       SELECT 
         qc_grade,
@@ -349,12 +441,23 @@ export const getQCReport = async (req: Request, res: Response) => {
       GROUP BY qc_grade, qc_status
     `;
 
-        const summaryResult = await query(summarySql, params);
+        const countSql = `SELECT COUNT(*) as total FROM qc q WHERE ${whereClause}`;
+
+        const [result, summaryResult, countResult] = await Promise.all([
+            query(sql, params),
+            query(summarySql, countParams),
+            query(countSql, countParams)
+        ]);
+
+        const total = parseInt(countResult.rows[0]?.total || '0');
 
         res.json({
             data: result.rows,
             summary: summaryResult.rows,
-            total: result.rows.length
+            total,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil(total / Number(limit))
         });
     } catch (error: any) {
         console.error('❌ QC report error:', error);
@@ -364,9 +467,11 @@ export const getQCReport = async (req: Request, res: Response) => {
 
 // =================== PICKING REPORTS ===================
 
+// ⚡ OPTIMIZED with pagination
 export const getPickingReport = async (req: Request, res: Response) => {
     try {
-        const { warehouse_id, start_date, end_date, customer } = req.query;
+        const { warehouse_id, start_date, end_date, customer, page = 1, limit = 1000 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
 
         let whereConditions: string[] = ['1=1'];
         const params: any[] = [];
@@ -398,6 +503,7 @@ export const getPickingReport = async (req: Request, res: Response) => {
 
         const whereClause = whereConditions.join(' AND ');
 
+        // ⚡ OPTIMIZED: Add LIMIT and OFFSET for pagination
         const sql = `
       SELECT 
         p.*,
@@ -409,10 +515,28 @@ export const getPickingReport = async (req: Request, res: Response) => {
       LEFT JOIN master_data m ON p.wsn = m.wsn
       WHERE ${whereClause}
       ORDER BY p.picking_date DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
+        params.push(Number(limit), offset);
 
-        const result = await query(sql, params);
-        res.json({ data: result.rows, total: result.rows.length });
+        // Get total count for pagination
+        const countParams = params.slice(0, -2);
+        const countSql = `SELECT COUNT(*) as total FROM picking p WHERE ${whereClause}`;
+
+        const [result, countResult] = await Promise.all([
+            query(sql, params),
+            query(countSql, countParams)
+        ]);
+
+        const total = parseInt(countResult.rows[0]?.total || '0');
+
+        res.json({
+            data: result.rows,
+            total,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil(total / Number(limit))
+        });
     } catch (error: any) {
         console.error('❌ Picking report error:', error);
         res.status(500).json({ error: error.message });

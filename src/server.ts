@@ -1,6 +1,7 @@
 // File Path = warehouse-backend/src/server.ts
 import dotenv from 'dotenv';
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 
 // Load .env from project root or fallback to repo's safe_secrets/.env for local dev (do NOT commit secrets)
@@ -122,12 +123,14 @@ app.get('/downloads/print-agent', async (req: Request, res: Response) => {
 
     // Check if R2 is configured
     if (!process.env.CLOUDFLARE_R2_ACCOUNT_ID || !process.env.CLOUDFLARE_R2_ACCESS_KEY) {
-      // Fallback to local file
+      // Fallback to local file - ⚡ OPTIMIZED: Use async file check
       const installerPath = path.join(__dirname, '../installers/WMS-Print-Agent-Setup.exe');
-      if (fs.existsSync(installerPath)) {
+      try {
+        await fsPromises.access(installerPath, fs.constants.R_OK);
         return res.download(installerPath, 'WMS-Print-Agent-Setup.exe');
+      } catch {
+        return res.status(404).json({ error: 'Print Agent installer not found' });
       }
-      return res.status(404).json({ error: 'Print Agent installer not found' });
     }
 
     // Download from Cloudflare R2

@@ -2,6 +2,7 @@
 import { Request, Response } from 'express';
 import { query, getPool } from '../config/database';
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -461,7 +462,10 @@ export const downloadBackup = async (req: Request, res: Response) => {
         const backup = result.rows[0];
         const filePath = backup.file_path;
 
-        if (!fs.existsSync(filePath)) {
+        // ⚡ OPTIMIZED: Use async file check
+        try {
+            await fsPromises.access(filePath, fs.constants.R_OK);
+        } catch {
             return res.status(404).json({ error: 'Backup file not found on disk' });
         }
 
@@ -496,9 +500,12 @@ export const deleteBackup = async (req: Request, res: Response) => {
             await deleteFromR2(fileName);
         }
 
-        // Delete file from local disk
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
+        // Delete file from local disk - ⚡ OPTIMIZED: Use async file operations
+        try {
+            await fsPromises.access(filePath, fs.constants.F_OK);
+            await fsPromises.unlink(filePath);
+        } catch {
+            // File doesn't exist, that's okay
         }
 
         // Delete record from database
@@ -538,7 +545,10 @@ export const restoreBackup = async (req: Request, res: Response) => {
         const backup = result.rows[0];
         const filePath = backup.file_path;
 
-        if (!fs.existsSync(filePath)) {
+        // ⚡ OPTIMIZED: Use async file check
+        try {
+            await fsPromises.access(filePath, fs.constants.R_OK);
+        } catch {
             return res.status(404).json({ error: 'Backup file not found on disk' });
         }
 
