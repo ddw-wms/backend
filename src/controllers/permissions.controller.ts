@@ -41,8 +41,9 @@ export const getMyPermissions = async (req: Request, res: Response) => {
     try {
         const user = (req as any).user;
 
-        // Super admin gets everything enabled and visible
-        if (user.role === 'super_admin' || user.role === 'admin') {
+        // ONLY Super admin gets everything enabled and visible automatically
+        // Admin role should respect their role-based permission settings
+        if (user.role === 'super_admin') {
             const perms = await query(`
                 SELECT code, name, category, page
                 FROM permissions
@@ -57,14 +58,14 @@ export const getMyPermissions = async (req: Request, res: Response) => {
                     page: p.page,
                     is_enabled: true,
                     is_visible: true,
-                    source: 'admin'
+                    source: 'super_admin'
                 };
             });
 
             return res.json({
                 permissions,
                 role: user.role,
-                isAdmin: true
+                isAdmin: true  // Only super_admin is true admin with full bypass
             });
         }
 
@@ -102,9 +103,9 @@ export const getMyPermissions = async (req: Request, res: Response) => {
         });
     } catch (error: any) {
         console.error('Get my permissions error:', error);
-        // Fallback for admin
+        // Fallback for super_admin only
         const user = (req as any).user;
-        if (user.role === 'super_admin' || user.role === 'admin') {
+        if (user.role === 'super_admin') {
             return res.json({ permissions: {}, role: user.role, isAdmin: true, legacy: true });
         }
         res.status(500).json({ error: error.message });
