@@ -175,19 +175,33 @@ export const updateRolePermissions = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Permissions array required' });
         }
 
+        // Build batch upsert query for better performance
+        // Instead of 76 individual queries, do one batch query
+        const values: any[] = [];
+        const placeholders: string[] = [];
+
+        permissions.forEach((perm, idx) => {
+            const offset = idx * 4;
+            placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`);
+            values.push(roleId, perm.code, perm.is_enabled, perm.is_visible);
+        });
+
+        if (placeholders.length === 0) {
+            return res.json({ success: true, message: 'No permissions to update' });
+        }
+
         await query('BEGIN');
 
-        for (const perm of permissions) {
-            await query(`
-                INSERT INTO role_permissions (role_id, permission_code, is_enabled, is_visible)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (role_id, permission_code)
-                DO UPDATE SET 
-                    is_enabled = $3, 
-                    is_visible = $4,
-                    updated_at = NOW()
-            `, [roleId, perm.code, perm.is_enabled, perm.is_visible]);
-        }
+        // Batch upsert all permissions in one query
+        await query(`
+            INSERT INTO role_permissions (role_id, permission_code, is_enabled, is_visible)
+            VALUES ${placeholders.join(', ')}
+            ON CONFLICT (role_id, permission_code)
+            DO UPDATE SET 
+                is_enabled = EXCLUDED.is_enabled, 
+                is_visible = EXCLUDED.is_visible,
+                updated_at = NOW()
+        `, values);
 
         await query('COMMIT');
 
@@ -262,14 +276,23 @@ export const updateUserOverrides = async (req: Request, res: Response) => {
         // First, delete all existing overrides for this user
         await query('DELETE FROM user_permission_overrides WHERE user_id = $1', [userId]);
 
-        // Insert new overrides (only where is_enabled or is_visible is not null)
-        for (const ovr of overrides) {
-            if (ovr.is_enabled !== null || ovr.is_visible !== null) {
-                await query(`
-                    INSERT INTO user_permission_overrides (user_id, permission_code, is_enabled, is_visible)
-                    VALUES ($1, $2, $3, $4)
-                `, [userId, ovr.code, ovr.is_enabled, ovr.is_visible]);
-            }
+        // Filter and batch insert overrides (only where is_enabled or is_visible is not null)
+        const validOverrides = overrides.filter(ovr => ovr.is_enabled !== null || ovr.is_visible !== null);
+
+        if (validOverrides.length > 0) {
+            const values: any[] = [];
+            const placeholders: string[] = [];
+
+            validOverrides.forEach((ovr, idx) => {
+                const offset = idx * 4;
+                placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`);
+                values.push(userId, ovr.code, ovr.is_enabled, ovr.is_visible);
+            });
+
+            await query(`
+                INSERT INTO user_permission_overrides (user_id, permission_code, is_enabled, is_visible)
+                VALUES ${placeholders.join(', ')}
+            `, values);
         }
 
         await query('COMMIT');
