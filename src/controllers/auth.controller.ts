@@ -111,7 +111,7 @@ export const login = async (req: Request, res: Response) => {
     // Create active session for tracking logged-in users
     try {
       const tokenHash = hashToken(token);
-      const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 hours (match JWT expiry)
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days (match JWT expiry)
       const ipAddress = req.ip || req.headers['x-forwarded-for'] || 'unknown';
       const userAgent = req.headers['user-agent'] || 'unknown';
 
