@@ -1,13 +1,73 @@
 // File Path = warehouse-backend/src/routes/error-logs.routes.ts
-import express, { Router } from 'express';
-import { authMiddleware, hasRole } from '../middleware/auth.middleware';
+import express, { Router, Request, Response, NextFunction } from 'express';
+import { authMiddleware } from '../middleware/auth.middleware';
 import { query } from '../config/database';
 
 const router: Router = express.Router();
 
-// All routes require super_admin only
+// Middleware to check if user can access error logs (admin, super_admin, or users with permission)
+const canAccessErrorLogs = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const user = req.user;
+        console.log('[ErrorLogs] User check:', JSON.stringify(user));
+
+        if (!user) {
+            console.log('[ErrorLogs] No user found');
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
+        // Super admin and admin always have access (case-insensitive check)
+        const role = (user.role || '').toLowerCase();
+        if (role === 'super_admin' || role === 'admin') {
+            console.log('[ErrorLogs] Admin/Super admin access granted for role:', user.role);
+            return next();
+        }
+
+        // For other users, check if they have the menu permission
+        const permResult = await query(
+            `SELECT 1 FROM permissions p
+             JOIN role_permissions rp ON p.id = rp.permission_id
+             JOIN roles r ON r.id = rp.role_id
+             JOIN users u ON u.role = r.name
+             WHERE u.id = $1 
+             AND p.code = 'menu:settings:errorlogs'
+             AND rp.is_visible = true
+             LIMIT 1`,
+            [user.userId]
+        );
+
+        if (permResult.rows.length > 0) {
+            console.log('[ErrorLogs] Role permission granted');
+            return next();
+        }
+
+        // Also check user permission overrides
+        const overrideResult = await query(
+            `SELECT 1 FROM permissions p
+             JOIN user_permission_overrides upo ON p.id = upo.permission_id
+             WHERE upo.user_id = $1 
+             AND p.code = 'menu:settings:errorlogs'
+             AND upo.is_visible = true
+             LIMIT 1`,
+            [user.userId]
+        );
+
+        if (overrideResult.rows.length > 0) {
+            console.log('[ErrorLogs] User override permission granted');
+            return next();
+        }
+
+        console.log('[ErrorLogs] Access denied for user:', user.username, 'role:', user.role);
+        return res.status(403).json({ error: 'Access denied: You do not have permission to view error logs' });
+    } catch (error) {
+        console.error('Error checking error logs permission:', error);
+        return res.status(500).json({ error: 'Failed to check permissions' });
+    }
+};
+
+// All routes require authentication
 router.use(authMiddleware);
-router.use(hasRole('super_admin'));
+router.use(canAccessErrorLogs);
 
 // Get recent error logs (last 100)
 router.get('/', async (req, res) => {
