@@ -320,7 +320,8 @@ export const updateUserWarehouses = async (req: Request, res: Response) => {
 };
 
 /**
- * Create a new role
+ * Create a new role with default view-only permissions
+ * New roles get: all permissions visible, only menu permissions enabled
  */
 export const createRole = async (req: Request, res: Response) => {
     try {
@@ -330,14 +331,33 @@ export const createRole = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Role name required' });
         }
 
+        await query('BEGIN');
+
+        // Create the role
         const result = await query(`
             INSERT INTO roles (name, description, is_system_role, is_active, priority)
             VALUES ($1, $2, false, true, 20)
             RETURNING *
         `, [name.toLowerCase().replace(/\s+/g, '_'), description || '']);
 
+        const newRoleId = result.rows[0].id;
+
+        // Set default view-only permissions for the new role
+        // All permissions are visible, but only menu permissions are enabled
+        await query(`
+            INSERT INTO role_permissions (role_id, permission_code, is_enabled, is_visible)
+            SELECT $1, code, 
+                   CASE WHEN code LIKE 'menu:%' THEN true ELSE false END as is_enabled,
+                   true as is_visible
+            FROM permissions
+            ON CONFLICT (role_id, permission_code) DO NOTHING
+        `, [newRoleId]);
+
+        await query('COMMIT');
+
         res.json(result.rows[0]);
     } catch (error: any) {
+        await query('ROLLBACK');
         console.error('Create role error:', error);
         if (error.code === '23505') {
             return res.status(400).json({ error: 'Role already exists' });
