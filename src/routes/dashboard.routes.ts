@@ -20,4 +20,9 @@ router.get('/activity-logs', dashboardController.getActivityLogs);
 // ✅ NEW: Export data with filters
 router.get('/export-data', dashboardController.getInventoryDataForExport);
 
+// ✅ PIVOT TABLE APIs - Server-side aggregation for large data
+router.get('/pivot-summary', dashboardController.getPivotSummary);
+router.get('/pivot-filters', dashboardController.getPivotFilters);
+router.get('/pivot-drilldown', dashboardController.getPivotDrilldown);
+
 export default router;

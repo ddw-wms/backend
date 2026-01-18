@@ -148,11 +148,12 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
         m.invoice_date, m.fkt_link, m.p_type, m.p_size, m.vrp, m.yield_value,
         m.fkqc_remark, m.fk_grade,
         q.id AS qc_id, q.qc_date,
+        COALESCE(q.qc_grade, '') AS qc_grade,
         CASE WHEN q.id IS NOT NULL THEN 'DONE' ELSE 'Pending' END AS qc_status,
         p.id AS picking_id, p.picking_date,
-        COALESCE(p.picking_remarks, 'Pending') AS picking_status,
+        CASE WHEN p.id IS NOT NULL THEN 'DONE' ELSE 'PENDING' END AS picking_status,
         o.id AS outbound_id, o.dispatch_date AS outbound_date,
-        COALESCE(o.dispatch_remarks, 'Pending') AS outbound_status, o.vehicle_no,
+        CASE WHEN o.id IS NOT NULL THEN 'DONE' ELSE 'PENDING' END AS outbound_status, o.vehicle_no,
         CASE
           WHEN o.id IS NOT NULL AND o.dispatch_date IS NOT NULL THEN 'DISPATCHED'
           WHEN p.id IS NOT NULL THEN 'PICKING'
@@ -460,5 +461,308 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
   } catch (error: any) {
     console.error('Export data error:', error);
     res.status(500).json({ error: error.message });
+  }
+};
+
+// ============================================================================
+// PIVOT TABLE APIs - Server-side aggregation for large data (5-10 lakh+ rows)
+// ============================================================================
+
+/**
+ * Get pivot summary - Category-wise count of available inventory
+ * Optimized for large datasets using SQL aggregation
+ */
+export const getPivotSummary = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId, groupBy = 'cms_vertical', brand, category } = req.query;
+
+    if (!warehouseId) {
+      return res.status(400).json({ error: 'Warehouse ID required' });
+    }
+
+    // Validate groupBy field to prevent SQL injection
+    const allowedGroupFields = ['cms_vertical', 'brand', 'qc_grade', 'current_stage'];
+    const groupField = allowedGroupFields.includes(groupBy as string) ? groupBy : 'cms_vertical';
+
+    // Map groupBy to actual column reference
+    const groupColumnMap: Record<string, string> = {
+      'cms_vertical': 'm.cms_vertical',
+      'brand': 'm.brand',
+      'qc_grade': 'COALESCE(q.qc_grade, \'PENDING\')',
+      'current_stage': `CASE
+        WHEN o.id IS NOT NULL AND o.dispatch_date IS NOT NULL THEN 'DISPATCHED'
+        WHEN p.id IS NOT NULL THEN 'PICKING'
+        WHEN q.id IS NOT NULL AND q.qc_grade IS NOT NULL THEN 'QC_DONE'
+        ELSE 'INBOUND'
+      END`
+    };
+
+    const groupColumn = groupColumnMap[groupField as string] || 'm.cms_vertical';
+
+    // Build dynamic WHERE conditions for filters
+    const conditions: string[] = ['i.warehouse_id = $1', 'NOT (o.id IS NOT NULL AND o.dispatch_date IS NOT NULL)'];
+    const params: any[] = [warehouseId];
+    let paramIndex = 2;
+
+    if (brand) {
+      conditions.push(`m.brand = $${paramIndex}`);
+      params.push(brand);
+      paramIndex++;
+    }
+
+    if (category) {
+      conditions.push(`m.cms_vertical = $${paramIndex}`);
+      params.push(category);
+      paramIndex++;
+    }
+
+    // Optimized SQL for pivot summary - Only available inventory (not dispatched)
+    const sql = `
+      SELECT 
+        COALESCE(${groupColumn}, 'Unknown') as category,
+        COUNT(*) as qty,
+        COALESCE(SUM(CAST(NULLIF(m.fsp, '') AS NUMERIC)), 0) as total_fsp,
+        COALESCE(SUM(CAST(NULLIF(m.mrp, '') AS NUMERIC)), 0) as total_mrp,
+        COALESCE(SUM(CAST(NULLIF(m.vrp, '') AS NUMERIC)), 0) as total_vrp
+      FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
+      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
+      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
+      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+      WHERE ${conditions.join(' AND ')}
+      GROUP BY ${groupColumn}
+      ORDER BY qty DESC
+    `;
+
+    const result = await query(sql, params);
+
+    // Calculate grand total
+    const grandTotal = result.rows.reduce((acc, row) => ({
+      qty: acc.qty + parseInt(row.qty),
+      total_fsp: acc.total_fsp + parseFloat(row.total_fsp || 0),
+      total_mrp: acc.total_mrp + parseFloat(row.total_mrp || 0),
+      total_vrp: acc.total_vrp + parseFloat(row.total_vrp || 0),
+    }), { qty: 0, total_fsp: 0, total_mrp: 0, total_vrp: 0 });
+
+    return res.json({
+      success: true,
+      groupBy: groupField,
+      data: result.rows.map(row => ({
+        category: row.category || 'Unknown',
+        qty: parseInt(row.qty),
+        total_fsp: parseFloat(row.total_fsp || 0),
+        total_mrp: parseFloat(row.total_mrp || 0),
+        total_vrp: parseFloat(row.total_vrp || 0),
+      })),
+      grandTotal,
+      generatedAt: new Date().toISOString(),
+    });
+
+  } catch (error: any) {
+    console.error('Pivot summary error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Get all unique brands and categories for pivot filters
+ */
+export const getPivotFilters = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId } = req.query;
+
+    if (!warehouseId) {
+      return res.status(400).json({ error: 'Warehouse ID required' });
+    }
+
+    // Get unique brands and categories from available inventory
+    const sql = `
+      SELECT 
+        ARRAY_AGG(DISTINCT m.brand) FILTER (WHERE m.brand IS NOT NULL AND m.brand != '') as brands,
+        ARRAY_AGG(DISTINCT m.cms_vertical) FILTER (WHERE m.cms_vertical IS NOT NULL AND m.cms_vertical != '') as categories
+      FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
+      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+      WHERE i.warehouse_id = $1
+        AND NOT (o.id IS NOT NULL AND o.dispatch_date IS NOT NULL)
+    `;
+
+    const result = await query(sql, [warehouseId]);
+    const row = result.rows[0] || {};
+
+    return res.json({
+      success: true,
+      brands: (row.brands || []).sort(),
+      categories: (row.categories || []).sort(),
+    });
+
+  } catch (error: any) {
+    console.error('Pivot filters error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Get drill-down data for a specific category
+ * Returns full master_data details with pagination for large results
+ */
+export const getPivotDrilldown = async (req: Request, res: Response) => {
+  try {
+    const {
+      warehouseId,
+      groupBy = 'cms_vertical',
+      categoryValue,
+      page = 1,
+      limit = 100,
+      exportAll = false  // If true, returns all data for Excel export
+    } = req.query;
+
+    if (!warehouseId) {
+      return res.status(400).json({ error: 'Warehouse ID required' });
+    }
+
+    if (!categoryValue) {
+      return res.status(400).json({ error: 'Category value required' });
+    }
+
+    // Map groupBy to actual column reference
+    const groupColumnMap: Record<string, string> = {
+      'cms_vertical': 'm.cms_vertical',
+      'brand': 'm.brand',
+      'qc_grade': 'COALESCE(q.qc_grade, \'PENDING\')',
+      'current_stage': `CASE
+        WHEN o.id IS NOT NULL AND o.dispatch_date IS NOT NULL THEN 'DISPATCHED'
+        WHEN p.id IS NOT NULL THEN 'PICKING'
+        WHEN q.id IS NOT NULL AND q.qc_grade IS NOT NULL THEN 'QC_DONE'
+        ELSE 'INBOUND'
+      END`
+    };
+
+    const groupColumn = groupColumnMap[groupBy as string] || 'm.cms_vertical';
+    const offset = (Number(page) - 1) * Number(limit);
+
+    // Count query
+    const countSql = `
+      SELECT COUNT(*) as total
+      FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
+      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
+      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
+      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+      WHERE i.warehouse_id = $1
+        AND NOT (o.id IS NOT NULL AND o.dispatch_date IS NOT NULL)
+        AND COALESCE(${groupColumn}, 'Unknown') = $2
+    `;
+
+    // Data query - ALL master_data columns + related data
+    const dataSql = `
+      SELECT 
+        -- Master Data (ALL columns)
+        m.id as master_id,
+        m.wsn,
+        m.wid,
+        m.fsn,
+        m.order_id,
+        m.fkqc_remark,
+        m.fk_grade,
+        m.product_title,
+        m.hsn_sac,
+        m.igst_rate,
+        m.fsp,
+        m.mrp,
+        m.invoice_date,
+        m.fkt_link,
+        m.wh_location,
+        m.brand,
+        m.cms_vertical,
+        m.vrp,
+        m.yield_value,
+        m.p_type,
+        m.p_size,
+        m.batch_id as master_batch_id,
+        m.actual_received,
+        m.upload_date,
+        m.created_user_name as master_created_by,
+        
+        -- Inbound Data
+        i.id as inbound_id,
+        i.inbound_date,
+        i.vehicle_no as inbound_vehicle,
+        i.unload_remarks,
+        i.quantity as inbound_qty,
+        i.rack_no,
+        i.warehouse_id,
+        i.warehouse_name,
+        i.batch_id as inbound_batch_id,
+        i.created_user_name as inbound_created_by,
+        i.created_at as inbound_created_at,
+        
+        -- QC Data
+        q.id as qc_id,
+        q.qc_date,
+        q.qc_grade,
+        q.qc_status,
+        q.qc_remarks,
+        q.qc_by,
+        
+        -- Picking Data
+        p.id as picking_id,
+        p.picking_date,
+        p.customer_name,
+        p.picking_remarks,
+        
+        -- Outbound Data (will be null for available items)
+        o.id as outbound_id,
+        o.dispatch_date,
+        o.vehicle_no as dispatch_vehicle,
+        o.dispatch_remarks,
+        
+        -- Computed Stage
+        CASE
+          WHEN o.id IS NOT NULL AND o.dispatch_date IS NOT NULL THEN 'DISPATCHED'
+          WHEN p.id IS NOT NULL THEN 'PICKING'
+          WHEN q.id IS NOT NULL AND q.qc_grade IS NOT NULL THEN 'QC_DONE'
+          ELSE 'INBOUND'
+        END as current_stage
+        
+      FROM inbound i
+      LEFT JOIN master_data m ON m.wsn = i.wsn
+      LEFT JOIN qc q ON i.wsn = q.wsn AND i.warehouse_id = q.warehouse_id
+      LEFT JOIN picking p ON i.wsn = p.wsn AND i.warehouse_id = p.warehouse_id
+      LEFT JOIN outbound o ON i.wsn = o.wsn AND i.warehouse_id = o.warehouse_id
+      WHERE i.warehouse_id = $1
+        AND NOT (o.id IS NOT NULL AND o.dispatch_date IS NOT NULL)
+        AND COALESCE(${groupColumn}, 'Unknown') = $2
+      ORDER BY i.created_at DESC
+      ${exportAll === 'true' ? '' : `LIMIT $3 OFFSET $4`}
+    `;
+
+    // Execute queries
+    const countResult = await query(countSql, [warehouseId, categoryValue]);
+    const total = parseInt(countResult.rows[0].total);
+
+    const dataParams = exportAll === 'true'
+      ? [warehouseId, categoryValue]
+      : [warehouseId, categoryValue, Number(limit), offset];
+
+    const dataResult = await query(dataSql, dataParams);
+
+    return res.json({
+      success: true,
+      categoryValue,
+      groupBy,
+      data: dataResult.rows,
+      pagination: exportAll === 'true' ? null : {
+        page: Number(page),
+        limit: Number(limit),
+        total,
+        totalPages: Math.ceil(total / Number(limit)),
+      },
+      generatedAt: new Date().toISOString(),
+    });
+
+  } catch (error: any) {
+    console.error('Pivot drilldown error:', error);
+    return res.status(500).json({ error: error.message });
   }
 };
