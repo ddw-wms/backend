@@ -166,7 +166,11 @@ export const getMasterDataByWSN = async (req: Request, res: Response) => {
     wsn = wsn.toUpperCase();
     console.log('🔍 Searching WSN:', wsn);
 
-    const sql = `SELECT * FROM master_data WHERE UPPER(wsn) = $1 LIMIT 1`;
+    // ⚡ EGRESS OPTIMIZATION: Select only needed columns instead of SELECT *
+    const sql = `SELECT wsn, wid, fsn, order_id, product_title, brand, mrp, fsp, 
+                        hsn_sac, igst_rate, cms_vertical, fkt_link, p_type, p_size, 
+                        vrp, yield_value, fk_grade, fkqc_remark, wh_location, batch_id
+                 FROM master_data WHERE UPPER(wsn) = $1 LIMIT 1`;
     const result = await query(sql, [wsn]);
 
     if (result.rows.length === 0) {

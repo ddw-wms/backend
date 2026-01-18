@@ -20,8 +20,11 @@ export const login = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
+    // ⚡ EGRESS OPTIMIZATION: Select only needed columns instead of SELECT *
     const result = await query(
-      'SELECT * FROM users WHERE username = $1 AND is_active = true',
+      `SELECT id, username, password_hash, full_name, email, role, warehouse_id, 
+              is_active, created_at, last_login 
+       FROM users WHERE username = $1 AND is_active = true`,
       [username]
     );
 

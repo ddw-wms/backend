@@ -1382,7 +1382,11 @@ export const exportMasterData = async (req: Request, res: Response) => {
     }
 
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-    const sql = `SELECT * FROM master_data ${whereClause} LIMIT 100000`;
+    // ⚡ EGRESS OPTIMIZATION: Select specific columns instead of SELECT *, reduced limit
+    const sql = `SELECT wsn, wid, fsn, order_id, product_title, brand, mrp, fsp, 
+                        hsn_sac, igst_rate, cms_vertical, fkt_link, p_type, p_size, 
+                        vrp, yield_value, fk_grade, fkqc_remark, wh_location, batch_id, created_at
+                 FROM master_data ${whereClause} LIMIT 50000`;
 
     const result = await query(sql, params);
 

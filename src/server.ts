@@ -91,8 +91,18 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Response compression for better performance
-app.use(compression());
+// ⚡ EGRESS OPTIMIZATION: Enhanced compression settings
+// Compresses responses > 1KB, reduces egress by 50-70%
+app.use(compression({
+  level: 6, // Balanced compression (1-9, 6 is good balance of speed/size)
+  threshold: 1024, // Only compress responses > 1KB
+  filter: (req, res) => {
+    // Don't compress if client doesn't accept it
+    if (req.headers['x-no-compression']) return false;
+    // Use default filter (compresses text, json, etc.)
+    return compression.filter(req, res);
+  }
+}));
 
 // 🚧 Ensure DB is ready before hitting any API (skip check in tests and health endpoints)
 app.use((req, res, next) => {

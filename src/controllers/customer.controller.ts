@@ -6,7 +6,7 @@ import { query } from '../config/database';
 export const getCustomers = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
-    
+
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
@@ -19,7 +19,7 @@ export const getCustomers = async (req: Request, res: Response) => {
       WHERE warehouse_id = $1
       ORDER BY name ASC
     `;
-    
+
     const result = await query(sql, [warehouseId]);
     res.json(result.rows);
   } catch (error: any) {
@@ -32,14 +32,17 @@ export const getCustomers = async (req: Request, res: Response) => {
 export const getCustomerById = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
-    const sql = `SELECT * FROM customers WHERE id = $1`;
+
+    // ⚡ EGRESS OPTIMIZATION: Select only needed columns
+    const sql = `SELECT id, name, contact_person, phone, email, address, 
+                        warehouse_id, created_at, updated_at 
+                 FROM customers WHERE id = $1`;
     const result = await query(sql, [id]);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    
+
     res.json(result.rows[0]);
   } catch (error: any) {
     console.error('Get customer by ID error:', error);
@@ -51,7 +54,7 @@ export const getCustomerById = async (req: Request, res: Response) => {
 export const createCustomer = async (req: Request, res: Response) => {
   try {
     const { name, contact_person, phone, email, address, warehouse_id } = req.body;
-    
+
     if (!name || !warehouse_id) {
       return res.status(400).json({ error: 'Name and warehouse_id are required' });
     }
@@ -62,7 +65,7 @@ export const createCustomer = async (req: Request, res: Response) => {
       WHERE LOWER(name) = LOWER($1) AND warehouse_id = $2
     `;
     const checkResult = await query(checkSql, [name, warehouse_id]);
-    
+
     if (checkResult.rows.length > 0) {
       return res.status(409).json({ error: 'Customer name already exists in this warehouse' });
     }
@@ -73,7 +76,7 @@ export const createCustomer = async (req: Request, res: Response) => {
       ) VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
     `;
-    
+
     const result = await query(sql, [
       name,
       contact_person || null,
@@ -82,7 +85,7 @@ export const createCustomer = async (req: Request, res: Response) => {
       address || null,
       warehouse_id
     ]);
-    
+
     res.status(201).json(result.rows[0]);
   } catch (error: any) {
     console.error('Create customer error:', error);
@@ -95,7 +98,7 @@ export const updateCustomer = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { name, contact_person, phone, email, address } = req.body;
-    
+
     if (!name) {
       return res.status(400).json({ error: 'Name is required' });
     }
@@ -103,7 +106,7 @@ export const updateCustomer = async (req: Request, res: Response) => {
     // Check if customer exists
     const checkSql = `SELECT warehouse_id FROM customers WHERE id = $1`;
     const checkResult = await query(checkSql, [id]);
-    
+
     if (checkResult.rows.length === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
@@ -116,7 +119,7 @@ export const updateCustomer = async (req: Request, res: Response) => {
       WHERE LOWER(name) = LOWER($1) AND warehouse_id = $2 AND id != $3
     `;
     const dupResult = await query(dupSql, [name, warehouseId, id]);
-    
+
     if (dupResult.rows.length > 0) {
       return res.status(409).json({ error: 'Customer name already exists in this warehouse' });
     }
@@ -132,7 +135,7 @@ export const updateCustomer = async (req: Request, res: Response) => {
       WHERE id = $6
       RETURNING *
     `;
-    
+
     const result = await query(sql, [
       name,
       contact_person || null,
@@ -141,7 +144,7 @@ export const updateCustomer = async (req: Request, res: Response) => {
       address || null,
       id
     ]);
-    
+
     res.json(result.rows[0]);
   } catch (error: any) {
     console.error('Update customer error:', error);
@@ -153,7 +156,7 @@ export const updateCustomer = async (req: Request, res: Response) => {
 export const deleteCustomer = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
+
     // Check if customer has any outbound entries
     const checkOutbound = `
       SELECT COUNT(*) as count FROM outbound WHERE customer_name = (
@@ -161,20 +164,20 @@ export const deleteCustomer = async (req: Request, res: Response) => {
       )
     `;
     const checkResult = await query(checkOutbound, [id]);
-    
+
     if (parseInt(checkResult.rows[0].count) > 0) {
-      return res.status(400).json({ 
-        error: 'Cannot delete customer with existing outbound entries' 
+      return res.status(400).json({
+        error: 'Cannot delete customer with existing outbound entries'
       });
     }
 
     const sql = `DELETE FROM customers WHERE id = $1 RETURNING *`;
     const result = await query(sql, [id]);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    
+
     res.json({ message: 'Customer deleted successfully' });
   } catch (error: any) {
     console.error('Delete customer error:', error);
@@ -186,7 +189,7 @@ export const deleteCustomer = async (req: Request, res: Response) => {
 export const getCustomerNames = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
-    
+
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
@@ -197,7 +200,7 @@ export const getCustomerNames = async (req: Request, res: Response) => {
       WHERE warehouse_id = $1 
       ORDER BY name ASC
     `;
-    
+
     const result = await query(sql, [warehouseId]);
     res.json(result.rows.map((r: any) => r.name));
   } catch (error: any) {
