@@ -1129,3 +1129,130 @@ export const getAllInboundWSNs = async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+// ============================================
+// SYNC RECEIVING WSNS - Track WSNs being scanned in multi-entry grid
+// ============================================
+export const syncReceivingWSNs = async (req: Request, res: Response) => {
+  try {
+    const { wsns, warehouse_id } = req.body;
+    const userId = (req as any).user?.userId || (req as any).user?.id;
+
+    if (!userId || !warehouse_id) {
+      return res.status(400).json({ error: 'User ID and warehouse ID required' });
+    }
+
+    // Validate wsns is an array
+    if (!Array.isArray(wsns)) {
+      return res.status(400).json({ error: 'WSNs must be an array' });
+    }
+
+    // Filter out empty WSNs and normalize
+    const validWSNs = wsns
+      .filter((w: string) => w && w.trim())
+      .map((w: string) => w.trim().toUpperCase());
+
+    // Start transaction
+    await query('BEGIN');
+
+    try {
+      // First, clear all WSNs for this user in this warehouse
+      await query(
+        `DELETE FROM receiving_wsns WHERE user_id = $1 AND warehouse_id = $2`,
+        [userId, warehouse_id]
+      );
+
+      // If there are valid WSNs, insert them
+      if (validWSNs.length > 0) {
+        // Use bulk insert with ON CONFLICT for efficiency
+        const values = validWSNs.map((wsn: string, idx: number) => {
+          const baseIdx = idx * 3;
+          return `($${baseIdx + 1}, $${baseIdx + 2}, $${baseIdx + 3})`;
+        }).join(', ');
+
+        const params = validWSNs.flatMap((wsn: string) => [wsn, userId, warehouse_id]);
+
+        await query(
+          `INSERT INTO receiving_wsns (wsn, user_id, warehouse_id) 
+           VALUES ${values}
+           ON CONFLICT (wsn, warehouse_id) DO UPDATE SET 
+             user_id = EXCLUDED.user_id,
+             updated_at = NOW()`,
+          params
+        );
+      }
+
+      await query('COMMIT');
+
+      res.json({
+        success: true,
+        synced: validWSNs.length,
+        message: `Synced ${validWSNs.length} WSNs to receiving state`
+      });
+    } catch (insertError) {
+      await query('ROLLBACK');
+      throw insertError;
+    }
+  } catch (error: any) {
+    console.error('❌ Sync receiving WSNs error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ============================================
+// CLEAR RECEIVING WSNS - Clear all WSNs for a user's session
+// ============================================
+export const clearReceivingWSNs = async (req: Request, res: Response) => {
+  try {
+    const { warehouse_id } = req.body;
+    const userId = (req as any).user?.userId || (req as any).user?.id;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID required' });
+    }
+
+    let deleteSql = `DELETE FROM receiving_wsns WHERE user_id = $1`;
+    const params: any[] = [userId];
+
+    if (warehouse_id) {
+      deleteSql += ` AND warehouse_id = $2`;
+      params.push(warehouse_id);
+    }
+
+    const result = await query(deleteSql, params);
+
+    res.json({
+      success: true,
+      cleared: result.rowCount,
+      message: `Cleared ${result.rowCount} WSNs from receiving state`
+    });
+  } catch (error: any) {
+    console.error('❌ Clear receiving WSNs error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ============================================
+// GET RECEIVING WSNS - Get all WSNs currently in receiving state
+// ============================================
+export const getReceivingWSNs = async (req: Request, res: Response) => {
+  try {
+    const { warehouse_id } = req.query;
+
+    let sql = `SELECT DISTINCT wsn FROM receiving_wsns`;
+    const params: any[] = [];
+
+    if (warehouse_id) {
+      sql += ` WHERE warehouse_id = $1`;
+      params.push(warehouse_id);
+    }
+
+    const result = await query(sql, params);
+    const wsns = result.rows.map((r: any) => r.wsn);
+
+    res.json(wsns);
+  } catch (error: any) {
+    console.error('❌ Get receiving WSNs error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

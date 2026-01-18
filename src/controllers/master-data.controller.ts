@@ -210,8 +210,11 @@ export const getMasterData = async (req: Request, res: Response) => {
     if (status && status !== '' && status !== 'All') {
       if (status === 'Received') {
         statusWhereClause = ` AND EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn)`;
+      } else if (status === 'Receiving') {
+        // Only in receiving_wsns but NOT in inbound
+        statusWhereClause = ` AND EXISTS(SELECT 1 FROM receiving_wsns WHERE UPPER(receiving_wsns.wsn) = UPPER(md.wsn)) AND NOT EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn)`;
       } else if (status === 'Pending') {
-        statusWhereClause = ` AND NOT EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn)`;
+        statusWhereClause = ` AND NOT EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn) AND NOT EXISTS(SELECT 1 FROM receiving_wsns WHERE UPPER(receiving_wsns.wsn) = UPPER(md.wsn))`;
       }
     }
 
@@ -225,6 +228,7 @@ export const getMasterData = async (req: Request, res: Response) => {
       `SELECT md.*,
               CASE 
                 WHEN EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn) THEN 'Received'
+                WHEN EXISTS(SELECT 1 FROM receiving_wsns WHERE UPPER(receiving_wsns.wsn) = UPPER(md.wsn)) THEN 'Receiving'
                 ELSE 'Pending'
               END as actual_received
        FROM master_data md
@@ -268,8 +272,10 @@ export const getMasterData = async (req: Request, res: Response) => {
     if (status && status !== '' && status !== 'All') {
       if (status === 'Received') {
         countStatusWhereClause = ` AND EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn)`;
+      } else if (status === 'Receiving') {
+        countStatusWhereClause = ` AND EXISTS(SELECT 1 FROM receiving_wsns WHERE UPPER(receiving_wsns.wsn) = UPPER(md.wsn)) AND NOT EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn)`;
       } else if (status === 'Pending') {
-        countStatusWhereClause = ` AND NOT EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn)`;
+        countStatusWhereClause = ` AND NOT EXISTS(SELECT 1 FROM inbound WHERE inbound.wsn = md.wsn) AND NOT EXISTS(SELECT 1 FROM receiving_wsns WHERE UPPER(receiving_wsns.wsn) = UPPER(md.wsn))`;
       }
     }
 

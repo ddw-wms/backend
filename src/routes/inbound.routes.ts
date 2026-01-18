@@ -52,6 +52,11 @@ router.get('/categories', requirePermission('feature:inbound:view'), inboundCont
 router.get('/wsns/all', listTimeout, injectWarehouseFilter, requirePermission('feature:inbound:view'), inboundController.getAllInboundWSNs);
 router.get('/racks/:warehouseId', requireWarehouseAccess, requirePermission('feature:inbound:view'), inboundController.getWarehouseRacks);
 
+// Receiving WSNs tracking routes (for multi-entry scanning status)
+router.get('/receiving-wsns', requirePermission('feature:inbound:view'), inboundController.getReceivingWSNs);
+router.post('/receiving-wsns/sync', requireWarehouseAccess, requirePermission('feature:inbound:create'), inboundController.syncReceivingWSNs);
+router.post('/receiving-wsns/clear', requirePermission('feature:inbound:create'), inboundController.clearReceivingWSNs);
+
 // Create routes - require create permission and warehouse access
 router.post('/', requireWarehouseAccess, requirePermission('feature:inbound:create'), inboundController.createInboundEntry);
 router.post('/multi-entry', requireWarehouseAccess, requirePermission('feature:inbound:create'), inboundController.multiInboundEntry);
