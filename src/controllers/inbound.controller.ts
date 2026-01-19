@@ -1010,7 +1010,8 @@ export const getInboundList = async (req: Request, res: Response) => {
 // GET BATCHES
 export const getInboundBatches = async (req: Request, res: Response) => {
   try {
-    const { warehouseId } = req.query;
+    // Accept both warehouseId and warehouse_id parameter names
+    const warehouseId = req.query.warehouseId || req.query.warehouse_id;
     // Get accessible warehouses from middleware (user's allowed warehouses)
     const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
 
