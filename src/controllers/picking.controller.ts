@@ -241,14 +241,45 @@ export const getPickingList = async (req: Request, res: Response) => {
       batchId
     } = req.query;
 
-    if (!warehouseId) {
+    // Validate warehouse access - get accessible warehouses from middleware
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+
+    // If user has warehouse restrictions, validate the requested warehouse
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
+    // Require warehouseId for non-super users
+    if (!warehouseId && (!accessibleWarehouses || accessibleWarehouses.length === 0)) {
+      // Super admin/admin without restrictions still needs warehouse
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
 
     const offset = (Number(page) - 1) * Number(limit);
-    const conditions: string[] = ['p.warehouse_id = $1'];
-    const params: any[] = [warehouseId];
-    let paramIndex = 2;
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    // Warehouse filter - apply restriction or requested ID
+    if (accessibleWarehouses && accessibleWarehouses.length > 0) {
+      if (warehouseId) {
+        conditions.push(`p.warehouse_id = $${paramIndex}`);
+        params.push(warehouseId);
+        paramIndex++;
+      } else {
+        // Filter to user's accessible warehouses
+        conditions.push(`p.warehouse_id = ANY($${paramIndex}::int[])`);
+        params.push(accessibleWarehouses);
+        paramIndex++;
+      }
+    } else if (warehouseId) {
+      conditions.push(`p.warehouse_id = $${paramIndex}`);
+      params.push(warehouseId);
+      paramIndex++;
+    }
 
     if (search) {
       conditions.push(`(p.wsn ILIKE $${paramIndex} OR m.product_title ILIKE $${paramIndex} OR m.brand ILIKE $${paramIndex})`);
@@ -401,24 +432,48 @@ export const getExistingWSNs = async (req: Request, res: Response) => {
 export const getBatches = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
+    // Get accessible warehouses from middleware (user's allowed warehouses)
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
 
-    if (!warehouseId) {
-      return res.status(400).json({ error: 'Warehouse ID required' });
-    }
-
-    const sql = `
+    let sql = `
       SELECT 
         batch_id,
         COUNT(*) as count,
         COALESCE(MAX(created_at), MAX(picking_date)) as created_at,
         MIN(id) as id
       FROM picking
-      WHERE warehouse_id = $1 AND batch_id IS NOT NULL
-      GROUP BY batch_id
-      ORDER BY COALESCE(MAX(created_at), MAX(picking_date)) DESC
+      WHERE batch_id IS NOT NULL
     `;
+    const params: any[] = [];
+    let paramIndex = 1;
 
-    const result = await query(sql, [warehouseId]);
+    // Apply warehouse filter - prioritize middleware restriction, then query param
+    if (accessibleWarehouses && accessibleWarehouses.length > 0) {
+      if (warehouseId) {
+        const requestedId = parseInt(warehouseId as string);
+        if (!accessibleWarehouses.includes(requestedId)) {
+          return res.status(403).json({ error: 'Access denied to this warehouse' });
+        }
+        sql += ` AND warehouse_id = $${paramIndex}`;
+        params.push(requestedId);
+        paramIndex++;
+      } else {
+        sql += ` AND warehouse_id = ANY($${paramIndex}::int[])`;
+        params.push(accessibleWarehouses);
+        paramIndex++;
+      }
+    } else if (warehouseId) {
+      sql += ` AND warehouse_id = $${paramIndex}`;
+      params.push(warehouseId);
+      paramIndex++;
+    } else {
+      // No warehouse specified and no restrictions - still require warehouse for non-admin
+      return res.status(400).json({ error: 'Warehouse ID required' });
+    }
+
+    sql += ` GROUP BY batch_id ORDER BY COALESCE(MAX(created_at), MAX(picking_date)) DESC`;
+
+    const result = await query(sql, params);
 
     // Normalize created_at to ISO string when possible for consistent frontend formatting
     const rows = result.rows.map((r: any) => ({
@@ -437,9 +492,26 @@ export const getBatches = async (req: Request, res: Response) => {
 export const deleteBatch = async (req: Request, res: Response) => {
   try {
     const { batchId } = req.params;
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
 
     if (!batchId) {
       return res.status(400).json({ error: 'Batch ID required' });
+    }
+
+    // First check if the batch belongs to accessible warehouses
+    if (accessibleWarehouses && accessibleWarehouses.length > 0) {
+      const checkResult = await query(
+        'SELECT DISTINCT warehouse_id FROM picking WHERE batch_id = $1',
+        [batchId]
+      );
+
+      if (checkResult.rows.length > 0) {
+        const batchWarehouseIds = checkResult.rows.map((r: any) => r.warehouse_id);
+        const hasAccess = batchWarehouseIds.every((wId: number) => accessibleWarehouses.includes(wId));
+        if (!hasAccess) {
+          return res.status(403).json({ error: 'Access denied: batch contains items from warehouses you cannot access' });
+        }
+      }
     }
 
     const sql = `DELETE FROM picking WHERE batch_id = $1 RETURNING *`;

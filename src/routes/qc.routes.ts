@@ -47,8 +47,8 @@ router.post('/multi-entry', requireWarehouseAccess, requirePermission('feature:q
 router.post('/bulk-upload', uploadTimeout, requireWarehouseAccess, requirePermission('feature:qc:process'), upload.single('file'), bulkQCUpload);
 
 // Delete routes - require delete permission
-router.delete('/delete/:qcId', requirePermission('feature:qc:delete'), deleteQCEntry);
-router.delete('/batch/:batchId', requirePermission('feature:qc:delete'), deleteQCBatch);
+router.delete('/delete/:qcId', injectWarehouseFilter, requirePermission('feature:qc:delete'), deleteQCEntry);
+router.delete('/batch/:batchId', injectWarehouseFilter, requirePermission('feature:qc:delete'), deleteQCBatch);
 router.get('/categories', getQCCategories);
 
 // Export (extended timeout)

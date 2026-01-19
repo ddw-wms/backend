@@ -53,6 +53,6 @@ router.post('/multi', requireWarehouseAccess, requirePermission('feature:outboun
 router.post('/bulk', uploadTimeout, requireWarehouseAccess, requirePermission('feature:outbound:create'), upload.single('file'), bulkUpload);
 
 // Delete routes - require delete permission
-router.delete('/batch/:batchId', requirePermission('feature:outbound:delete'), deleteBatch);
+router.delete('/batch/:batchId', injectWarehouseFilter, requirePermission('feature:outbound:delete'), deleteBatch);
 
 export default router;

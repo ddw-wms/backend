@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import * as dashboardController from '../controllers/dashboard.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { injectWarehouseFilter } from '../middleware/rbac.middleware';
 
 const router = Router();
 
@@ -9,20 +10,20 @@ const router = Router();
 router.use(authMiddleware);
 
 // Get inventory pipeline (Inbound + QC + Picking + Outbound joined)
-router.get('/inventory-pipeline', dashboardController.getInventoryPipeline);
+router.get('/inventory-pipeline', injectWarehouseFilter, dashboardController.getInventoryPipeline);
 
 // Get inventory metrics
-router.get('/inventory-metrics', dashboardController.getInventoryMetrics);
+router.get('/inventory-metrics', injectWarehouseFilter, dashboardController.getInventoryMetrics);
 
 // Get activity logs
-router.get('/activity-logs', dashboardController.getActivityLogs);
+router.get('/activity-logs', injectWarehouseFilter, dashboardController.getActivityLogs);
 
 // ✅ NEW: Export data with filters
-router.get('/export-data', dashboardController.getInventoryDataForExport);
+router.get('/export-data', injectWarehouseFilter, dashboardController.getInventoryDataForExport);
 
 // ✅ PIVOT TABLE APIs - Server-side aggregation for large data
-router.get('/pivot-summary', dashboardController.getPivotSummary);
-router.get('/pivot-filters', dashboardController.getPivotFilters);
-router.get('/pivot-drilldown', dashboardController.getPivotDrilldown);
+router.get('/pivot-summary', injectWarehouseFilter, dashboardController.getPivotSummary);
+router.get('/pivot-filters', injectWarehouseFilter, dashboardController.getPivotFilters);
+router.get('/pivot-drilldown', injectWarehouseFilter, dashboardController.getPivotDrilldown);
 
 export default router;

@@ -7,6 +7,17 @@ export const getInventoryPipeline = async (req: Request, res: Response) => {
   try {
     const { warehouseId, page = 1, limit = 50, search, stage, availableOnly, brand, category, dateFrom, dateTo } = req.query;
 
+    // Validate warehouse access - get accessible warehouses from middleware
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+
+    // If user has warehouse restrictions, validate the requested warehouse
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
     if (!warehouseId) {
       return res.status(400).json({ error: "Warehouse ID required" });
     }
@@ -190,6 +201,15 @@ export const getInventoryMetrics = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
 
+    // Validate warehouse access
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
@@ -270,6 +290,15 @@ export const getActivityLogs = async (req: Request, res: Response) => {
   try {
     const { warehouseId, page = 1, limit = 50 } = req.query;
 
+    // Validate warehouse access
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
@@ -313,6 +342,15 @@ export const getInventoryDataForExport = async (req: Request, res: Response) => 
       category,
       search: searchText,   // 🔁 rename: frontend 'search' -> searchText
     } = req.query as any;
+
+    // Validate warehouse access
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
 
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
@@ -476,6 +514,15 @@ export const getPivotSummary = async (req: Request, res: Response) => {
   try {
     const { warehouseId, groupBy = 'cms_vertical', brand, category } = req.query;
 
+    // Validate warehouse access
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
@@ -571,6 +618,15 @@ export const getPivotFilters = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
 
+    // Validate warehouse access
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });
     }
@@ -616,6 +672,15 @@ export const getPivotDrilldown = async (req: Request, res: Response) => {
       limit = 100,
       exportAll = false  // If true, returns all data for Excel export
     } = req.query;
+
+    // Validate warehouse access
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
 
     if (!warehouseId) {
       return res.status(400).json({ error: 'Warehouse ID required' });

@@ -38,6 +38,6 @@ router.get('/categories', requirePermission('feature:picking:view'), getCategori
 router.post('/multi-entry', requireWarehouseAccess, requirePermission('feature:picking:create'), multiPickingEntry);
 
 // Delete routes - require delete permission
-router.delete('/batch/:batchId', requirePermission('feature:picking:delete'), deleteBatch);
+router.delete('/batch/:batchId', injectWarehouseFilter, requirePermission('feature:picking:delete'), deleteBatch);
 
 export default router;

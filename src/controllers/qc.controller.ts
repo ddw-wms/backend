@@ -104,6 +104,17 @@ export const getQCList = async (req: Request, res: Response) => {
       category,
     } = req.query;
 
+    // Validate warehouse access - get accessible warehouses from middleware
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+
+    // If user has warehouse restrictions, validate the requested warehouse
+    if (accessibleWarehouses && accessibleWarehouses.length > 0 && warehouseId) {
+      const requestedId = parseInt(warehouseId as string);
+      if (!accessibleWarehouses.includes(requestedId)) {
+        return res.status(403).json({ error: 'Access denied to this warehouse' });
+      }
+    }
+
     const offset = (Number(page) - 1) * Number(limit);
 
     // Determine if we need master_data join for filtering
@@ -120,7 +131,26 @@ export const getQCList = async (req: Request, res: Response) => {
     let paramIndex = 1;
     let countParamIndex = 1;
 
-    if (warehouseId) {
+    // Warehouse filter - apply restriction or requested ID
+    if (accessibleWarehouses && accessibleWarehouses.length > 0) {
+      if (warehouseId) {
+        whereConditions.push(`q.warehouse_id = $${paramIndex}`);
+        countWhereConditions.push(`q.warehouse_id = $${countParamIndex}`);
+        params.push(warehouseId);
+        countParams.push(warehouseId);
+        paramIndex++;
+        countParamIndex++;
+      } else {
+        // No specific warehouse requested, filter to user's accessible warehouses
+        whereConditions.push(`q.warehouse_id = ANY($${paramIndex}::int[])`);
+        countWhereConditions.push(`q.warehouse_id = ANY($${countParamIndex}::int[])`);
+        params.push(accessibleWarehouses);
+        countParams.push(accessibleWarehouses);
+        paramIndex++;
+        countParamIndex++;
+      }
+    } else if (warehouseId) {
+      // No restrictions (super_admin/admin), but specific warehouse requested
       whereConditions.push(`q.warehouse_id = $${paramIndex}`);
       countWhereConditions.push(`q.warehouse_id = $${countParamIndex}`);
       params.push(warehouseId);
@@ -743,6 +773,8 @@ export const getQCStats = async (req: Request, res: Response) => {
 export const getQCBatches = async (req: Request, res: Response) => {
   try {
     const { warehouseId } = req.query;
+    // Get accessible warehouses from middleware (user's allowed warehouses)
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
 
     let sql = `
       SELECT
@@ -755,11 +787,29 @@ export const getQCBatches = async (req: Request, res: Response) => {
     `;
 
     const params: any[] = [];
+    let paramIndex = 1;
 
-    if (warehouseId) {
-      sql += ` AND warehouse_id = $1`;
+    // Apply warehouse filter - prioritize middleware restriction, then query param
+    if (accessibleWarehouses && accessibleWarehouses.length > 0) {
+      if (warehouseId) {
+        const requestedId = parseInt(warehouseId as string);
+        if (!accessibleWarehouses.includes(requestedId)) {
+          return res.status(403).json({ error: 'Access denied to this warehouse' });
+        }
+        sql += ` AND warehouse_id = $${paramIndex}`;
+        params.push(requestedId);
+        paramIndex++;
+      } else {
+        sql += ` AND warehouse_id = ANY($${paramIndex}::int[])`;
+        params.push(accessibleWarehouses);
+        paramIndex++;
+      }
+    } else if (warehouseId) {
+      sql += ` AND warehouse_id = $${paramIndex}`;
       params.push(warehouseId);
+      paramIndex++;
     }
+    // If no accessibleWarehouses and no warehouseId, show all (super_admin/admin)
 
     sql += ` GROUP BY batch_id ORDER BY created_at DESC`;
 
@@ -775,6 +825,24 @@ export const getQCBatches = async (req: Request, res: Response) => {
 export const deleteQCBatch = async (req: Request, res: Response) => {
   try {
     const { batchId } = req.params;
+    const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
+
+    // First check if the batch belongs to accessible warehouses
+    if (accessibleWarehouses && accessibleWarehouses.length > 0) {
+      const checkResult = await query(
+        'SELECT DISTINCT warehouse_id FROM qc WHERE batch_id = $1',
+        [batchId]
+      );
+
+      if (checkResult.rows.length > 0) {
+        const batchWarehouseIds = checkResult.rows.map((r: any) => r.warehouse_id);
+        const hasAccess = batchWarehouseIds.every((wId: number) => accessibleWarehouses.includes(wId));
+        if (!hasAccess) {
+          return res.status(403).json({ error: 'Access denied: batch contains items from warehouses you cannot access' });
+        }
+      }
+    }
+
     const result = await query('DELETE FROM qc WHERE batch_id = $1', [batchId]);
 
     res.json({
