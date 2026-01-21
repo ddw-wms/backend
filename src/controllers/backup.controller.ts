@@ -520,6 +520,67 @@ export const deleteBackup = async (req: Request, res: Response) => {
     }
 };
 
+// ================= BULK DELETE BACKUPS =================
+export const bulkDeleteBackups = async (req: Request, res: Response) => {
+    try {
+        const { ids } = req.body;
+
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ error: 'Please provide backup IDs to delete' });
+        }
+
+        console.log(`🗑️ Bulk deleting ${ids.length} backups...`);
+
+        // Get all backup details
+        const result = await query(
+            'SELECT id, file_path, file_name FROM backups WHERE id = ANY($1)',
+            [ids]
+        );
+
+        let deletedCount = 0;
+        let failedCount = 0;
+        const errors: string[] = [];
+
+        for (const backup of result.rows) {
+            try {
+                // Delete from Cloudflare R2 (if configured)
+                if (isR2Configured()) {
+                    await deleteFromR2(backup.file_name);
+                }
+
+                // Delete file from local disk
+                try {
+                    await fsPromises.access(backup.file_path, fs.constants.F_OK);
+                    await fsPromises.unlink(backup.file_path);
+                } catch {
+                    // File doesn't exist, that's okay
+                }
+
+                // Delete record from database
+                await query('DELETE FROM backups WHERE id = $1', [backup.id]);
+                deletedCount++;
+            } catch (err: any) {
+                failedCount++;
+                errors.push(`Failed to delete backup ${backup.id}: ${err.message}`);
+            }
+        }
+
+        console.log(`✅ Bulk delete completed: ${deletedCount} deleted, ${failedCount} failed`);
+
+        res.json({
+            success: true,
+            message: `${deletedCount} backup(s) deleted successfully`,
+            deletedCount,
+            failedCount,
+            errors: errors.length > 0 ? errors : undefined
+        });
+
+    } catch (error: any) {
+        console.error('❌ Bulk delete backup error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
 // ================= RESTORE DATABASE (ASYNC with Progress) =================
 export const restoreBackup = async (req: Request, res: Response) => {
     try {
@@ -1042,7 +1103,8 @@ export const createSchedule = async (req: Request, res: Response) => {
             time_of_day = '02:00:00',
             day_of_week = 0,
             day_of_month = 1,
-            retention_days = 30
+            retention_days = 30,
+            selected_tables = null
         } = req.body;
         const user = (req as any).user;
 
@@ -1050,14 +1112,20 @@ export const createSchedule = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Name and frequency are required' });
         }
 
+        // Validate selective backup has modules selected
+        if (backup_type === 'selective' && (!selected_tables || selected_tables.length === 0)) {
+            return res.status(400).json({ error: 'Selective backup requires at least one module to be selected' });
+        }
+
         const result = await query(
             `INSERT INTO backup_schedules (
                 name, frequency, backup_type, description, enabled,
-                time_of_day, day_of_week, day_of_month, retention_days, created_by
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                time_of_day, day_of_week, day_of_month, retention_days, created_by, selected_tables
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *`,
             [name, frequency, backup_type, description, enabled,
-                time_of_day, day_of_week, day_of_month, retention_days, user?.id || null]
+                time_of_day, day_of_week, day_of_month, retention_days, user?.id || null,
+                backup_type === 'selective' ? selected_tables : null]
         );
 
         const schedule = result.rows[0];

@@ -1155,11 +1155,14 @@ export const getBatches = async (req: Request, res: Response) => {
     // Get accessible warehouses from middleware (user's allowed warehouses)
     const accessibleWarehouses = (req as any).accessibleWarehouses as number[] | null;
 
+    // Note: outbound table doesn't have created_at column
+    // batch_id format: OUT_BULK_YYYYMMDD_HHMMSS - extract date from batch_id for display
+    // Use MAX(id) for ordering (most recent inserts have higher IDs)
     let sql = `
       SELECT
         batch_id,
         COUNT(*) as count,
-        MAX(created_at) as last_updated
+        MAX(dispatch_date) as last_updated
       FROM outbound
       WHERE batch_id IS NOT NULL
     `;
@@ -1187,10 +1190,29 @@ export const getBatches = async (req: Request, res: Response) => {
       paramIndex++;
     }
 
-    sql += ` GROUP BY batch_id ORDER BY MAX(created_at) DESC`;
+    sql += ` GROUP BY batch_id ORDER BY MAX(id) DESC`;
 
     const result = await query(sql, params);
-    res.json(result.rows);
+
+    // Parse batch_id to extract upload date for display
+    // batch_id format: OUT_BULK_YYYYMMDD_HHMMSS or similar patterns
+    const batchesWithParsedDate = result.rows.map((row: any) => {
+      let uploadDate = row.last_updated; // fallback to dispatch_date
+
+      // Try to extract date from batch_id (e.g., OUT_BULK_20260121_134717)
+      const match = row.batch_id?.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+      if (match) {
+        const [, year, month, day, hour, min, sec] = match;
+        uploadDate = new Date(`${year}-${month}-${day}T${hour}:${min}:${sec}`).toISOString();
+      }
+
+      return {
+        ...row,
+        last_updated: uploadDate
+      };
+    });
+
+    res.json(batchesWithParsedDate);
   } catch (error: any) {
     console.error('❌ Get batches error:', error);
     res.status(500).json({ error: error.message });

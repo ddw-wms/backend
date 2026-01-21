@@ -21,6 +21,7 @@ interface Schedule {
     day_of_month: number;
     retention_days: number;
     next_run_at: string;
+    selected_tables: string[] | null;
 }
 
 class BackupScheduler {
@@ -62,7 +63,7 @@ class BackupScheduler {
 
         switch (schedule.frequency) {
             case 'hourly':
-                return `0 * * * *`; // Every hour at minute 0
+                return `${minute} * * * *`; // Every hour at specified minute
 
             case 'daily':
                 return `${minute} ${hour} * * *`; // Daily at specified time
@@ -106,18 +107,39 @@ class BackupScheduler {
 
     // Execute a scheduled backup
     private async executeScheduledBackup(schedule: Schedule) {
-        logger.info('Executing scheduled backup', { name: schedule.name });
+        logger.info('Executing scheduled backup', {
+            name: schedule.name,
+            type: schedule.backup_type,
+            selectedTables: schedule.selected_tables
+        });
 
         try {
+            // Prepare backup options based on backup type
+            const backupOptions: { tables?: string[]; includeUsers?: boolean } = {};
+
+            if (schedule.backup_type === 'selective' && schedule.selected_tables && schedule.selected_tables.length > 0) {
+                // Selective backup: use only the selected tables
+                backupOptions.tables = schedule.selected_tables;
+                logger.info('Creating selective backup', { tables: schedule.selected_tables });
+            } else {
+                // Full backup: include users
+                backupOptions.includeUsers = schedule.backup_type === 'full';
+            }
+
             // Create JSON backup
-            const backupResult = await createJSONBackup({
-                includeUsers: schedule.backup_type === 'full'
-            });
+            const backupResult = await createJSONBackup(backupOptions);
 
             // Upload to Cloudflare R2 (if configured)
             if (isR2Configured()) {
                 await uploadToR2(backupResult.filePath, backupResult.fileName);
             }
+
+            // Build description based on backup type
+            let backupDescription = schedule.description || 'Scheduled backup';
+            if (schedule.backup_type === 'selective' && schedule.selected_tables) {
+                backupDescription += ` [Modules: ${schedule.selected_tables.join(', ')}]`;
+            }
+            backupDescription += ` (${schedule.name})`;
 
             // Save backup metadata to database
             await query(
@@ -134,7 +156,7 @@ class BackupScheduler {
                     backupResult.filePath,
                     backupResult.fileSize,
                     'json',
-                    `${schedule.description || 'Scheduled backup'} (${schedule.name})`,
+                    backupDescription,
                     null // System-generated
                 ]
             );

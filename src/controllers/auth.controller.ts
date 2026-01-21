@@ -118,12 +118,39 @@ export const login = async (req: Request, res: Response) => {
       const ipAddress = req.ip || req.headers['x-forwarded-for'] || 'unknown';
       const userAgent = req.headers['user-agent'] || 'unknown';
 
-      await query(`
-        INSERT INTO active_sessions (user_id, token_hash, ip_address, user_agent, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
-      `, [user.id, tokenHash, ipAddress, userAgent, expiresAt]);
+      // Parse user agent for device info
+      const ua = (userAgent as string).toLowerCase();
+      let deviceType = 'desktop';
+      let browser = 'unknown';
+      let os = 'unknown';
 
-      logger.debug('Session created for user', { username: user.username });
+      // Detect device type
+      if (/mobile|android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua)) {
+        deviceType = /ipad|tablet/i.test(ua) ? 'tablet' : 'mobile';
+      }
+
+      // Detect browser
+      if (ua.includes('edg/')) browser = 'Edge';
+      else if (ua.includes('chrome')) browser = 'Chrome';
+      else if (ua.includes('firefox')) browser = 'Firefox';
+      else if (ua.includes('safari')) browser = 'Safari';
+      else if (ua.includes('opera') || ua.includes('opr')) browser = 'Opera';
+      else if (ua.includes('msie') || ua.includes('trident')) browser = 'IE';
+
+      // Detect OS
+      if (ua.includes('windows nt 10')) os = 'Windows 10/11';
+      else if (ua.includes('windows')) os = 'Windows';
+      else if (ua.includes('mac os x')) os = 'macOS';
+      else if (ua.includes('android')) os = 'Android';
+      else if (ua.includes('iphone') || ua.includes('ipad')) os = 'iOS';
+      else if (ua.includes('linux')) os = 'Linux';
+
+      await query(`
+        INSERT INTO active_sessions (user_id, token_hash, ip_address, user_agent, expires_at, device_type, browser, os, last_activity)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      `, [user.id, tokenHash, ipAddress, userAgent, expiresAt, deviceType, browser, os]);
+
+      logger.debug('Session created for user', { username: user.username, device: deviceType, browser, os });
     } catch (sessionError: any) {
       // Table might not exist yet - continue without session tracking
       logger.debug('Session tracking not available (table may not exist)');

@@ -60,6 +60,13 @@ router.delete(
     backupController.deleteBackup
 );
 
+// Bulk delete backups (admin/super_admin only)
+router.post(
+    '/bulk-delete',
+    hasRole('admin', 'super_admin'),
+    backupController.bulkDeleteBackups
+);
+
 // Selective backup (specific tables)
 router.post(
     '/selective',
