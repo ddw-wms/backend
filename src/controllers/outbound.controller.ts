@@ -1159,7 +1159,7 @@ export const getBatches = async (req: Request, res: Response) => {
       SELECT
         batch_id,
         COUNT(*) as count,
-        MAX(dispatch_date) as last_updated
+        MAX(created_at) as last_updated
       FROM outbound
       WHERE batch_id IS NOT NULL
     `;
@@ -1187,7 +1187,7 @@ export const getBatches = async (req: Request, res: Response) => {
       paramIndex++;
     }
 
-    sql += ` GROUP BY batch_id ORDER BY MAX(dispatch_date) DESC`;
+    sql += ` GROUP BY batch_id ORDER BY MAX(created_at) DESC`;
 
     const result = await query(sql, params);
     res.json(result.rows);
