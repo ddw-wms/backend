@@ -520,28 +520,78 @@ export const bulkUpload = async (req: Request, res: Response) => {
     const whResult = await query(whSql, [warehouseId]);
     const warehouseName = whResult.rows[0]?.name || '';
 
-    // Read Excel file using ExcelJS for safer server-side parsing
-    const workbook = new ExcelJS.Workbook();
-    await (workbook.xlsx as any).load(req.file.buffer);
-    const worksheet = workbook.worksheets[0];
+    // Determine file type from extension or buffer signature
+    const fileName = req.file.originalname?.toLowerCase() || '';
+    const isCSV = fileName.endsWith('.csv') ||
+      (req.file.buffer[0] !== 0x50 && req.file.buffer[1] !== 0x4B); // Not a ZIP/XLSX file
 
     const data: any[] = [];
     const headers: string[] = [];
 
-    worksheet.eachRow((row, rowNumber) => {
-      const values = row.values as any[];
-      if (rowNumber === 1) {
-        for (let i = 1; i < values.length; i++) {
-          headers.push(String(values[i] ?? '').trim());
+    if (isCSV) {
+      // Parse CSV file
+      const csvContent = req.file.buffer.toString('utf-8');
+      const lines = csvContent.split(/\r?\n/).filter(line => line.trim());
+
+      if (lines.length < 2) {
+        return res.status(400).json({ error: 'CSV file must have at least a header row and one data row' });
+      }
+
+      // Parse header row
+      const headerLine = lines[0];
+      const csvHeaders = headerLine.split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+      csvHeaders.forEach(h => headers.push(h));
+
+      // Parse data rows
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Simple CSV parsing (handles basic quoted values)
+        const values: string[] = [];
+        let current = '';
+        let inQuotes = false;
+
+        for (let j = 0; j < line.length; j++) {
+          const char = line[j];
+          if (char === '"') {
+            inQuotes = !inQuotes;
+          } else if (char === ',' && !inQuotes) {
+            values.push(current.trim());
+            current = '';
+          } else {
+            current += char;
+          }
         }
-      } else {
+        values.push(current.trim());
+
         const obj: any = {};
-        for (let i = 1; i < values.length; i++) {
-          obj[headers[i - 1] || `col_${i}`] = values[i];
+        for (let k = 0; k < headers.length; k++) {
+          obj[headers[k] || `col_${k + 1}`] = values[k] || '';
         }
         data.push(obj);
       }
-    });
+    } else {
+      // Read Excel file using ExcelJS for safer server-side parsing
+      const workbook = new ExcelJS.Workbook();
+      await (workbook.xlsx as any).load(req.file.buffer);
+      const worksheet = workbook.worksheets[0];
+
+      worksheet.eachRow((row, rowNumber) => {
+        const values = row.values as any[];
+        if (rowNumber === 1) {
+          for (let i = 1; i < values.length; i++) {
+            headers.push(String(values[i] ?? '').trim());
+          }
+        } else {
+          const obj: any = {};
+          for (let i = 1; i < values.length; i++) {
+            obj[headers[i - 1] || `col_${i}`] = values[i];
+          }
+          data.push(obj);
+        }
+      });
+    }
 
     if (data.length === 0) {
       return res.status(400).json({ error: 'Empty file' });
