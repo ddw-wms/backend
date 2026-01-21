@@ -502,7 +502,9 @@ export const multiEntry = async (req: Request, res: Response) => {
 };
 
 // ====== BULK UPLOAD (COMPLETE IMPLEMENTATION) ======
+// ====== BULK UPLOAD - HIGHLY OPTIMIZED for 500K-5M rows ======
 export const bulkUpload = async (req: Request, res: Response) => {
+  const startTime = Date.now();
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -523,10 +525,12 @@ export const bulkUpload = async (req: Request, res: Response) => {
     // Determine file type from extension or buffer signature
     const fileName = req.file.originalname?.toLowerCase() || '';
     const isCSV = fileName.endsWith('.csv') ||
-      (req.file.buffer[0] !== 0x50 && req.file.buffer[1] !== 0x4B); // Not a ZIP/XLSX file
+      (req.file.buffer[0] !== 0x50 && req.file.buffer[1] !== 0x4B);
 
     const data: any[] = [];
     const headers: string[] = [];
+
+    console.log(`📂 Parsing ${isCSV ? 'CSV' : 'Excel'} file: ${fileName}`);
 
     if (isCSV) {
       // Parse CSV file
@@ -547,7 +551,6 @@ export const bulkUpload = async (req: Request, res: Response) => {
         const line = lines[i].trim();
         if (!line) continue;
 
-        // Simple CSV parsing (handles basic quoted values)
         const values: string[] = [];
         let current = '';
         let inQuotes = false;
@@ -572,7 +575,7 @@ export const bulkUpload = async (req: Request, res: Response) => {
         data.push(obj);
       }
     } else {
-      // Read Excel file using ExcelJS for safer server-side parsing
+      // Read Excel file using ExcelJS
       const workbook = new ExcelJS.Workbook();
       await (workbook.xlsx as any).load(req.file.buffer);
       const worksheet = workbook.worksheets[0];
@@ -597,141 +600,234 @@ export const bulkUpload = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Empty file' });
     }
 
-    // GENERATE BATCH ID - OUT_BULK_YYYYMMDD_HHMMSS
+    console.log(`📊 Parsed ${data.length} rows in ${Date.now() - startTime}ms`);
+
+    // GENERATE BATCH ID
     const now = new Date();
     const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
     const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, '');
     const batchId = `OUT_BULK_${dateStr}_${timeStr}`;
 
-    // Get all WSNs from file
-    const wsns = data.map((row: any) => row.WSN || row.wsn).filter(Boolean);
+    // Helper function to get value with multiple possible column names
+    const getValue = (row: any, ...keys: string[]): string => {
+      for (const key of keys) {
+        if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
+          return String(row[key]).trim();
+        }
+      }
+      return '';
+    };
 
-    // Check existing WSNs
-    const existingMap = new Map();
+    // Get all WSNs from file (normalize to uppercase)
+    const wsns = data.map((row: any) => {
+      const wsn = getValue(row, 'WSN', 'wsn', 'Wsn');
+      return wsn ? wsn.toUpperCase().trim() : null;
+    }).filter(Boolean) as string[];
+
+    console.log(`🔍 Checking ${wsns.length} WSNs for duplicates...`);
+
+    // BULK CHECK: Get all existing outbound WSNs in one query
+    const existingSet = new Set<string>();
     if (wsns.length > 0) {
-      const checkSql = `SELECT wsn FROM outbound WHERE wsn = ANY($1)`;
+      const checkSql = `SELECT UPPER(TRIM(wsn)) as wsn FROM outbound WHERE UPPER(TRIM(wsn)) = ANY($1)`;
       const checkRes = await query(checkSql, [wsns]);
-      checkRes.rows.forEach((row: any) => {
-        existingMap.set(row.wsn, true);
+      checkRes.rows.forEach((row: any) => existingSet.add(row.wsn));
+    }
+
+    console.log(`✅ Found ${existingSet.size} existing WSNs, checking source data...`);
+
+    // BULK FETCH: Get source data for all WSNs at once (PICKING → QC → INBOUND priority)
+    const sourceMap = new Map<string, { source: string }>();
+
+    // Fetch from PICKING in bulk
+    if (wsns.length > 0) {
+      const pickingSql = `SELECT UPPER(TRIM(wsn)) as wsn FROM picking WHERE UPPER(TRIM(wsn)) = ANY($1) AND warehouse_id = $2`;
+      const pickingRes = await query(pickingSql, [wsns, warehouseId]);
+      pickingRes.rows.forEach((row: any) => sourceMap.set(row.wsn, { source: 'PICKING' }));
+    }
+
+    // Fetch from QC in bulk (only for WSNs not in PICKING)
+    const wsnsNotInPicking = wsns.filter(w => !sourceMap.has(w));
+    if (wsnsNotInPicking.length > 0) {
+      const qcSql = `SELECT UPPER(TRIM(wsn)) as wsn FROM qc WHERE UPPER(TRIM(wsn)) = ANY($1) AND warehouse_id = $2`;
+      const qcRes = await query(qcSql, [wsnsNotInPicking, warehouseId]);
+      qcRes.rows.forEach((row: any) => {
+        if (!sourceMap.has(row.wsn)) sourceMap.set(row.wsn, { source: 'QC' });
       });
     }
 
-    let successCount = 0;
+    // Fetch from INBOUND in bulk (only for WSNs not in PICKING or QC)
+    const wsnsNotInPickingOrQC = wsns.filter(w => !sourceMap.has(w));
+    if (wsnsNotInPickingOrQC.length > 0) {
+      const inboundSql = `SELECT UPPER(TRIM(wsn)) as wsn FROM inbound WHERE UPPER(TRIM(wsn)) = ANY($1) AND warehouse_id = $2`;
+      const inboundRes = await query(inboundSql, [wsnsNotInPickingOrQC, warehouseId]);
+      inboundRes.rows.forEach((row: any) => {
+        if (!sourceMap.has(row.wsn)) sourceMap.set(row.wsn, { source: 'INBOUND' });
+      });
+    }
+
+    console.log(`📦 Found source data for ${sourceMap.size} WSNs`);
+
+    // Prepare data for batch insert
+    const validRows: any[] = [];
     const errors: any[] = [];
 
-    // Process each row
     for (const row of data) {
-      const wsn = (row as any).WSN || (row as any).wsn;
+      const wsn = getValue(row, 'WSN', 'wsn', 'Wsn').toUpperCase().trim();
+
       if (!wsn) {
-        errors.push({ row, error: 'Missing WSN' });
+        errors.push({ row: data.indexOf(row) + 2, error: 'Missing WSN' });
         continue;
       }
 
-      if (existingMap.has(wsn)) {
+      if (existingSet.has(wsn)) {
         errors.push({ wsn, error: 'Duplicate - Already dispatched' });
         continue;
       }
 
-      // Fetch source data (PICKING → QC → INBOUND)
-      let sourceData: any = null;
-      let sourceType = '';
+      const sourceInfo = sourceMap.get(wsn);
+      if (!sourceInfo) {
+        errors.push({ wsn, error: 'WSN not found in Picking/QC/Inbound' });
+        continue;
+      }
 
-      // Check PICKING
-      let sourceSql = `
-        SELECT 
-          p.*,
-          m.wid, m.fsn, m.order_id, m.fkqc_remark, m.fk_grade, m.product_title,
-          m.hsn_sac, m.igst_rate, m.fsp, m.mrp, m.invoice_date, m.fkt_link,
-          m.wh_location, m.brand, m.cms_vertical, m.vrp, m.yield_value, m.p_type, m.p_size
-        FROM picking p
-        LEFT JOIN master_data m ON p.wsn = m.wsn
-        WHERE p.wsn = $1 AND p.warehouse_id = $2
-        LIMIT 1
-      `;
-      let sourceResult = await query(sourceSql, [wsn, warehouseId]);
-
-      if (sourceResult.rows.length > 0) {
-        sourceData = sourceResult.rows[0];
-        sourceType = 'PICKING';
+      // Parse dispatch date - handle multiple formats
+      let dispatchDate = getValue(row, 'DISPATCHDATE', 'DISPATCH_DATE', 'dispatchdate', 'dispatch_date', 'DispatchDate');
+      if (!dispatchDate) {
+        dispatchDate = new Date().toISOString().split('T')[0];
       } else {
-        // Check QC
-        sourceSql = `
-          SELECT 
-            q.*,
-            m.wid, m.fsn, m.order_id, m.fkqc_remark, m.fk_grade, m.product_title,
-            m.hsn_sac, m.igst_rate, m.fsp, m.mrp, m.invoice_date, m.fkt_link,
-            m.wh_location, m.brand, m.cms_vertical, m.vrp, m.yield_value, m.p_type, m.p_size,
-            i.inbound_date, i.vehicle_no as inbound_vehicle_no, i.unload_remarks
-          FROM qc q
-          LEFT JOIN master_data m ON q.wsn = m.wsn
-          LEFT JOIN inbound i ON q.wsn = i.wsn
-          WHERE q.wsn = $1 AND q.warehouse_id = $2
-          LIMIT 1
-        `;
-        sourceResult = await query(sourceSql, [wsn, warehouseId]);
-
-        if (sourceResult.rows.length > 0) {
-          sourceData = sourceResult.rows[0];
-          sourceType = 'QC';
-        } else {
-          // Check INBOUND
-          sourceSql = `
-            SELECT 
-              i.*,
-              m.wid, m.fsn, m.order_id, m.fkqc_remark, m.fk_grade, m.product_title,
-              m.hsn_sac, m.igst_rate, m.fsp, m.mrp, m.invoice_date, m.fkt_link,
-              m.wh_location, m.brand, m.cms_vertical, m.vrp, m.yield_value, m.p_type, m.p_size
-            FROM inbound i
-            LEFT JOIN master_data m ON i.wsn = m.wsn
-            WHERE i.wsn = $1 AND i.warehouse_id = $2
-            LIMIT 1
-          `;
-          sourceResult = await query(sourceSql, [wsn, warehouseId]);
-
-          if (sourceResult.rows.length === 0) {
-            errors.push({ wsn, error: 'WSN not found in Picking/QC/Inbound' });
-            continue;
+        // Handle Excel date serial numbers
+        if (typeof row.DISPATCHDATE === 'number' || typeof row.dispatchdate === 'number') {
+          const excelDate = row.DISPATCHDATE || row.dispatchdate;
+          const jsDate = new Date((excelDate - 25569) * 86400 * 1000);
+          dispatchDate = jsDate.toISOString().split('T')[0];
+        } else if (dispatchDate.includes('/')) {
+          // Handle DD/MM/YYYY format
+          const parts = dispatchDate.split('/');
+          if (parts.length === 3) {
+            dispatchDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
           }
-
-          sourceData = sourceResult.rows[0];
-          sourceType = 'INBOUND';
         }
       }
 
-      // Insert into outbound
+      validRows.push({
+        wsn,
+        dispatch_date: dispatchDate,
+        customer_name: getValue(row, 'CUSTOMERNAME', 'CUSTOMER_NAME', 'customername', 'customer_name', 'CustomerName'),
+        vehicle_no: getValue(row, 'VEHICLENO', 'VEHICLE_NO', 'vehicleno', 'vehicle_no', 'VehicleNo'),
+        dispatch_remarks: getValue(row, 'DISPATCHREMARKS', 'DISPATCH_REMARKS', 'dispatchremarks', 'dispatch_remarks', 'DispatchRemarks'),
+        other_remarks: getValue(row, 'OTHERREMARKS', 'OTHER_REMARKS', 'otherremarks', 'other_remarks', 'OtherRemarks'),
+        source: sourceInfo.source
+      });
+    }
+
+    console.log(`✅ Validated ${validRows.length} rows, ${errors.length} errors`);
+
+    if (validRows.length === 0) {
+      return res.json({
+        batchId,
+        totalRows: data.length,
+        successCount: 0,
+        errorCount: errors.length,
+        errors: errors.slice(0, 50),
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // BATCH INSERT using PostgreSQL unnest for maximum performance
+    const BATCH_SIZE = 1000; // Insert 1000 rows at a time
+    let successCount = 0;
+
+    console.log(`🚀 Starting batch insert of ${validRows.length} rows...`);
+
+    for (let i = 0; i < validRows.length; i += BATCH_SIZE) {
+      const batch = validRows.slice(i, i + BATCH_SIZE);
+
+      // Build arrays for unnest
+      const dispatchDates: string[] = [];
+      const customerNames: string[] = [];
+      const wsnList: string[] = [];
+      const vehicleNos: string[] = [];
+      const dispatchRemarks: string[] = [];
+      const otherRemarks: string[] = [];
+      const quantities: number[] = [];
+      const sources: string[] = [];
+      const warehouseIds: number[] = [];
+      const warehouseNames: string[] = [];
+      const batchIds: string[] = [];
+      const userNames: string[] = [];
+
+      for (const row of batch) {
+        dispatchDates.push(row.dispatch_date);
+        customerNames.push(row.customer_name);
+        wsnList.push(row.wsn);
+        vehicleNos.push(row.vehicle_no);
+        dispatchRemarks.push(row.dispatch_remarks);
+        otherRemarks.push(row.other_remarks);
+        quantities.push(1);
+        sources.push(row.source);
+        warehouseIds.push(warehouseId);
+        warehouseNames.push(warehouseName);
+        batchIds.push(batchId);
+        userNames.push(userName);
+      }
+
+      // Use unnest for bulk insert
       const insertSql = `
         INSERT INTO outbound (
           dispatch_date, customer_name, wsn, vehicle_no, dispatch_remarks, other_remarks,
           quantity, source, warehouse_id, warehouse_name, batch_id, created_user_name
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        )
+        SELECT * FROM unnest(
+          $1::date[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+          $7::int[], $8::text[], $9::int[], $10::text[], $11::text[], $12::text[]
         )
       `;
 
-      await query(insertSql, [
-        (row as any).DISPATCH_DATE || (row as any).dispatch_date || new Date().toISOString().split('T')[0],
-        (row as any).CUSTOMER_NAME || (row as any).customer_name || '',
-        wsn,
-        (row as any).VEHICLE_NO || (row as any).vehicle_no || '',
-        (row as any).DISPATCH_REMARKS || (row as any).dispatch_remarks || '',
-        (row as any).OTHER_REMARKS || (row as any).other_remarks || '',
-        1,
-        sourceType,
-        warehouseId,
-        warehouseName,
-        batchId,
-        userName
-      ]);
+      try {
+        await query(insertSql, [
+          dispatchDates, customerNames, wsnList, vehicleNos, dispatchRemarks, otherRemarks,
+          quantities, sources, warehouseIds, warehouseNames, batchIds, userNames
+        ]);
+        successCount += batch.length;
+      } catch (batchError: any) {
+        console.error(`❌ Batch insert error at rows ${i}-${i + batch.length}:`, batchError.message);
+        // Fall back to individual inserts for this batch
+        for (const row of batch) {
+          try {
+            await query(`
+              INSERT INTO outbound (
+                dispatch_date, customer_name, wsn, vehicle_no, dispatch_remarks, other_remarks,
+                quantity, source, warehouse_id, warehouse_name, batch_id, created_user_name
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            `, [
+              row.dispatch_date, row.customer_name, row.wsn, row.vehicle_no,
+              row.dispatch_remarks, row.other_remarks, 1, row.source,
+              warehouseId, warehouseName, batchId, userName
+            ]);
+            successCount++;
+          } catch (rowError: any) {
+            errors.push({ wsn: row.wsn, error: rowError.message });
+          }
+        }
+      }
 
-      successCount++;
+      // Log progress for large uploads
+      if (validRows.length > 5000 && (i + BATCH_SIZE) % 10000 === 0) {
+        console.log(`📊 Progress: ${Math.min(i + BATCH_SIZE, validRows.length)}/${validRows.length} rows inserted`);
+      }
     }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ Bulk upload completed: ${successCount}/${data.length} rows in ${totalTime}ms`);
 
     res.json({
       batchId,
       totalRows: data.length,
       successCount,
       errorCount: errors.length,
-      errors: errors.slice(0, 10), // Return first 10 errors
+      errors: errors.slice(0, 50),
+      duration: `${totalTime}ms`,
       timestamp: new Date().toISOString()
     });
   } catch (error: any) {

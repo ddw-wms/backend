@@ -42,6 +42,11 @@ export const requestTimeout = (timeoutMs: number = 60000) => {
 export const uploadTimeout = requestTimeout(10 * 60 * 1000);
 
 /**
+ * Extra long timeout for massive bulk uploads (30 minutes) - for 500K-5M rows
+ */
+export const bulkUploadTimeout = requestTimeout(30 * 60 * 1000);
+
+/**
  * Backup/Restore operations timeout (20 minutes)
  */
 export const backupTimeout = requestTimeout(20 * 60 * 1000);

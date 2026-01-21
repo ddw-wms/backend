@@ -7,7 +7,7 @@ import {
   requireWarehouseAccess,
   injectWarehouseFilter
 } from '../middleware/rbac.middleware';
-import { listTimeout, uploadTimeout } from '../middleware/timeout.middleware';
+import { listTimeout, bulkUploadTimeout } from '../middleware/timeout.middleware';
 import {
   getAllOutboundWSNs,
   getPendingForOutbound,
@@ -27,7 +27,12 @@ import {
 } from '../controllers/outbound.controller';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+
+// Configure multer with larger file size limit for bulk uploads (100MB)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+});
 
 // All routes require authentication
 router.use(authMiddleware);
@@ -50,7 +55,8 @@ router.get('/export', listTimeout, injectWarehouseFilter, requirePermission('fea
 // Create routes - require create permission
 router.post('/single', requireWarehouseAccess, requirePermission('feature:outbound:create'), createSingleEntry);
 router.post('/multi', requireWarehouseAccess, requirePermission('feature:outbound:create'), multiEntry);
-router.post('/bulk', uploadTimeout, requireWarehouseAccess, requirePermission('feature:outbound:create'), upload.single('file'), bulkUpload);
+// Bulk upload with 30 minute timeout for massive files (500K-5M rows)
+router.post('/bulk', bulkUploadTimeout, requireWarehouseAccess, requirePermission('feature:outbound:create'), upload.single('file'), bulkUpload);
 
 // Delete routes - require delete permission
 router.delete('/batch/:batchId', injectWarehouseFilter, requirePermission('feature:outbound:delete'), deleteBatch);
