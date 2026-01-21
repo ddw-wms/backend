@@ -48,7 +48,7 @@ setInterval(() => {
 export const createInboundEntry = async (req: Request, res: Response) => {
   try {
     const {
-      wsn,
+      wsn: rawWsn,
       inbound_date,
       vehicle_no,
       product_serial_number,
@@ -58,6 +58,9 @@ export const createInboundEntry = async (req: Request, res: Response) => {
       update_existing,
     } = req.body;
 
+    // Convert WSN to uppercase for consistent matching with master_data
+    const wsn = rawWsn?.trim()?.toUpperCase();
+
     const userId = (req as any).user?.id;
     const userName = (req as any).user?.full_name ||
       (req as any).user?.name ||
@@ -66,8 +69,8 @@ export const createInboundEntry = async (req: Request, res: Response) => {
 
     console.log('📦 Creating single inbound entry:', { wsn, warehouse_id });
 
-    // Check if WSN exists in ANY warehouse
-    const checkAnySql = `SELECT id, warehouse_id FROM inbound WHERE wsn = $1 LIMIT 1`;
+    // Check if WSN exists in ANY warehouse - case insensitive
+    const checkAnySql = `SELECT id, warehouse_id FROM inbound WHERE UPPER(wsn) = $1 LIMIT 1`;
     const checkAnyResult = await query(checkAnySql, [wsn]);
 
     if (checkAnyResult.rows.length > 0) {
@@ -360,16 +363,16 @@ async function processInboundBulk(
     const whResult = await query(whSql, [warehouseId]);
     const warehouseName = whResult.rows[0]?.name || '';
 
-    // Collect WSN list
+    // Collect WSN list - Convert to UPPERCASE for consistency
     const wsns = data
       .map((row: any) => row['WSN'] || row['wsn'])
       .filter(Boolean)
-      .map((v: any) => String(v).trim());
+      .map((v: any) => String(v).trim().toUpperCase());
 
-    // Check existing inbound
+    // Check existing inbound - use case-insensitive comparison
     const existingMap = new Map<string, number>();
     if (wsns.length > 0) {
-      const existingSql = `SELECT wsn, warehouse_id FROM inbound WHERE wsn = ANY($1)`;
+      const existingSql = `SELECT UPPER(wsn) as wsn, warehouse_id FROM inbound WHERE UPPER(wsn) = ANY($1)`;
       const existingResult = await query(existingSql, [wsns]);
       existingResult.rows.forEach((row: any) => {
         existingMap.set(row.wsn, row.warehouse_id);
@@ -380,7 +383,8 @@ async function processInboundBulk(
 
     for (let idx = 0; idx < data.length; idx++) {
       const row = data[idx];
-      const wsn = String(row['WSN'] || row['wsn'] || '').trim();
+      // Convert WSN to UPPERCASE for consistent storage and matching with master_data
+      const wsn = String(row['WSN'] || row['wsn'] || '').trim().toUpperCase();
 
       if (!wsn) {
         errorCount++;
@@ -509,6 +513,7 @@ async function processInboundBulk(
             batchId,
             userId,
             userName,
+            new Date().toISOString(), // created_at
           ];
 
           const placeholders = rowParams
@@ -530,7 +535,8 @@ async function processInboundBulk(
             warehouse_name,
             batch_id,
             created_by,
-            created_user_name
+            created_user_name,
+            created_at
           ) VALUES ${valuesClauses.join(', ')}
         `;
 
@@ -669,9 +675,9 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
         const valuePlaceholders: string[] = [];
 
         batch.forEach((entry, idx) => {
-          const offset = idx * 11;
+          const offset = idx * 12;
           valuePlaceholders.push(
-            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12})`
           );
           values.push(
             entry.wsn,
@@ -684,7 +690,8 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
             entry.warehouse_name,
             entry.batch_id,
             entry.created_by,
-            entry.created_user_name
+            entry.created_user_name,
+            new Date().toISOString() // created_at
           );
         });
 
@@ -700,7 +707,8 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
             warehouse_name,
             batch_id,
             created_by,
-            created_user_name
+            created_user_name,
+            created_at
           )
           VALUES ${valuePlaceholders.join(', ')}
         `;
@@ -721,13 +729,13 @@ export const multiInboundEntry = async (req: Request, res: Response) => {
               await query(`
                 INSERT INTO inbound (
                   wsn, inbound_date, vehicle_no, product_serial_number, rack_no,
-                  unload_remarks, warehouse_id, warehouse_name, batch_id, created_by, created_user_name
+                  unload_remarks, warehouse_id, warehouse_name, batch_id, created_by, created_user_name, created_at
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
               `, [
                 entry.wsn, entry.inbound_date, entry.vehicle_no, entry.product_serial_number,
                 entry.rack_no, entry.unload_remarks, entry.warehouse_id, entry.warehouse_name,
-                entry.batch_id, entry.created_by, entry.created_user_name
+                entry.batch_id, entry.created_by, entry.created_user_name, new Date().toISOString()
               ]);
               results.push({ wsn: entry.wsn, status: 'SUCCESS', message: 'Created' });
               successCount++;
@@ -1019,7 +1027,7 @@ export const getInboundBatches = async (req: Request, res: Response) => {
       SELECT 
         batch_id, 
         COUNT(*) as count, 
-        MAX(created_at) as last_updated
+        COALESCE(MAX(created_at), MAX(inbound_date::timestamp), NOW()) as last_updated
       FROM inbound
       WHERE batch_id IS NOT NULL
     `;
