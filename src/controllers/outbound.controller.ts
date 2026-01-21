@@ -618,6 +618,56 @@ export const bulkUpload = async (req: Request, res: Response) => {
       return '';
     };
 
+    // Helper function to parse date from various formats (Excel Date objects, strings, numbers)
+    const parseDate = (row: any, ...keys: string[]): string => {
+      for (const key of keys) {
+        const val = row[key];
+        if (val === undefined || val === null || val === '') continue;
+
+        // Handle JavaScript Date objects (from ExcelJS)
+        if (val instanceof Date) {
+          return val.toISOString().split('T')[0]; // Returns YYYY-MM-DD
+        }
+
+        // Handle Excel serial date numbers
+        if (typeof val === 'number') {
+          const jsDate = new Date((val - 25569) * 86400 * 1000);
+          return jsDate.toISOString().split('T')[0];
+        }
+
+        // Handle string dates
+        if (typeof val === 'string') {
+          const str = val.trim();
+
+          // Already in YYYY-MM-DD format
+          if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+            return str;
+          }
+
+          // DD/MM/YYYY format
+          if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(str)) {
+            const parts = str.split('/');
+            return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+          }
+
+          // MM/DD/YYYY format (US format)
+          if (/^\d{1,2}\/\d{1,2}\/\d{2}$/.test(str)) {
+            const parts = str.split('/');
+            const year = parseInt(parts[2]) > 50 ? `19${parts[2]}` : `20${parts[2]}`;
+            return `${year}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+          }
+
+          // Try parsing as Date string (handles "Tue Jan 20 2026..." format)
+          const parsed = new Date(str);
+          if (!isNaN(parsed.getTime())) {
+            return parsed.toISOString().split('T')[0];
+          }
+        }
+      }
+      // Default to today's date if nothing found
+      return new Date().toISOString().split('T')[0];
+    };
+
     // Get all WSNs from file (normalize to uppercase)
     const wsns = data.map((row: any) => {
       const wsn = getValue(row, 'WSN', 'wsn', 'Wsn');
@@ -691,24 +741,8 @@ export const bulkUpload = async (req: Request, res: Response) => {
         continue;
       }
 
-      // Parse dispatch date - handle multiple formats
-      let dispatchDate = getValue(row, 'DISPATCHDATE', 'DISPATCH_DATE', 'dispatchdate', 'dispatch_date', 'DispatchDate');
-      if (!dispatchDate) {
-        dispatchDate = new Date().toISOString().split('T')[0];
-      } else {
-        // Handle Excel date serial numbers
-        if (typeof row.DISPATCHDATE === 'number' || typeof row.dispatchdate === 'number') {
-          const excelDate = row.DISPATCHDATE || row.dispatchdate;
-          const jsDate = new Date((excelDate - 25569) * 86400 * 1000);
-          dispatchDate = jsDate.toISOString().split('T')[0];
-        } else if (dispatchDate.includes('/')) {
-          // Handle DD/MM/YYYY format
-          const parts = dispatchDate.split('/');
-          if (parts.length === 3) {
-            dispatchDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
-          }
-        }
-      }
+      // Parse dispatch date using the helper function
+      const dispatchDate = parseDate(row, 'DISPATCHDATE', 'DISPATCH_DATE', 'dispatchdate', 'dispatch_date', 'DispatchDate');
 
       validRows.push({
         wsn,
