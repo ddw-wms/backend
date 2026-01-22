@@ -171,6 +171,11 @@ export const updateRolePermissions = async (req: Request, res: Response) => {
         const { roleId } = req.params;
         const { permissions } = req.body; // Array of { code, is_enabled, is_visible }
 
+        console.log(`[updateRolePermissions] roleId: ${roleId}, permissions count: ${Array.isArray(permissions) ? permissions.length : 'not array'}`);
+        if (Array.isArray(permissions) && permissions.length > 0) {
+            console.log('[updateRolePermissions] First 3 permission codes:', permissions.slice(0, 3).map((p: any) => p.code));
+        }
+
         if (!Array.isArray(permissions)) {
             return res.status(400).json({ error: 'Permissions array required' });
         }
@@ -205,10 +210,12 @@ export const updateRolePermissions = async (req: Request, res: Response) => {
 
         await query('COMMIT');
 
+        console.log(`[updateRolePermissions] SUCCESS - roleId: ${roleId}`);
         res.json({ success: true, message: 'Role permissions updated' });
     } catch (error: any) {
         await query('ROLLBACK');
-        console.error('Update role permissions error:', error);
+        console.error('[updateRolePermissions] ERROR:', error.message);
+        console.error('[updateRolePermissions] Full error:', error);
         res.status(500).json({ error: error.message });
     }
 };
