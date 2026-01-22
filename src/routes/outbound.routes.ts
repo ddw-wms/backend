@@ -23,7 +23,8 @@ import {
   exportToExcel,
   getBrands,
   getCategories,
-  getSources
+  getSources,
+  getAvailableForOutbound
 } from '../controllers/outbound.controller';
 
 const router = Router();
@@ -48,6 +49,7 @@ router.get('/batches', listTimeout, injectWarehouseFilter, requirePermission('fe
 router.get('/brands', requirePermission('feature:outbound:view'), getBrands);
 router.get('/categories', requirePermission('feature:outbound:view'), getCategories);
 router.get('/sources', requirePermission('feature:outbound:view'), getSources);
+router.get('/available-inventory', listTimeout, requirePermission('feature:outbound:view'), getAvailableForOutbound);
 
 // Export routes - require export permission (extended timeout)
 router.get('/export', listTimeout, injectWarehouseFilter, requirePermission('feature:outbound:export'), exportToExcel);

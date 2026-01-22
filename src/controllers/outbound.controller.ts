@@ -84,6 +84,78 @@ export const getPendingForOutbound = async (req: Request, res: Response) => {
   }
 };
 
+// ====== GET ALL AVAILABLE INVENTORY FOR OUTBOUND CACHING ======
+export const getAvailableForOutbound = async (req: Request, res: Response) => {
+  try {
+    const { warehouseId } = req.query;
+
+    if (!warehouseId) {
+      return res.status(400).json({ error: 'Warehouse ID required' });
+    }
+
+    console.log('📦 Loading available inventory for outbound cache, warehouse:', warehouseId);
+
+    // Get all items from PICKING, QC, INBOUND that are NOT yet dispatched
+    const sql = `
+      -- Items from PICKING (not yet dispatched)
+      SELECT 
+        p.wsn, 'PICKING' as source,
+        p.picking_date as picked_date, p.rack_no, p.picker_name as picked_by_name,
+        m.wid, m.fsn, m.order_id, m.product_title, m.brand, m.cms_vertical,
+        m.mrp, m.fsp, m.hsn_sac, m.igst_rate, m.fkt_link,
+        m.wh_location, m.vrp, m.yield_value, m.p_type, m.p_size,
+        m.fk_grade, m.fkqc_remark, m.invoice_date
+      FROM picking p
+      LEFT JOIN master_data m ON UPPER(TRIM(p.wsn)) = UPPER(TRIM(m.wsn))
+      WHERE p.warehouse_id = $1
+        AND NOT EXISTS (SELECT 1 FROM outbound o WHERE UPPER(TRIM(o.wsn)) = UPPER(TRIM(p.wsn)))
+
+      UNION ALL
+
+      -- Items from QC (pass status, not in picking, not yet dispatched)
+      SELECT 
+        q.wsn, 'QC' as source,
+        q.qc_date as picked_date, q.rack_no, q.qc_by_name as picked_by_name,
+        m.wid, m.fsn, m.order_id, m.product_title, m.brand, m.cms_vertical,
+        m.mrp, m.fsp, m.hsn_sac, m.igst_rate, m.fkt_link,
+        m.wh_location, m.vrp, m.yield_value, m.p_type, m.p_size,
+        m.fk_grade, m.fkqc_remark, m.invoice_date
+      FROM qc q
+      LEFT JOIN master_data m ON UPPER(TRIM(q.wsn)) = UPPER(TRIM(m.wsn))
+      WHERE q.warehouse_id = $1
+        AND q.qc_status = 'Pass'
+        AND NOT EXISTS (SELECT 1 FROM picking p WHERE UPPER(TRIM(p.wsn)) = UPPER(TRIM(q.wsn)))
+        AND NOT EXISTS (SELECT 1 FROM outbound o WHERE UPPER(TRIM(o.wsn)) = UPPER(TRIM(q.wsn)))
+
+      UNION ALL
+
+      -- Items from INBOUND (not in QC, not in picking, not yet dispatched)
+      SELECT 
+        i.wsn, 'INBOUND' as source,
+        i.inbound_date as picked_date, i.rack_no, i.created_user_name as picked_by_name,
+        m.wid, m.fsn, m.order_id, m.product_title, m.brand, m.cms_vertical,
+        m.mrp, m.fsp, m.hsn_sac, m.igst_rate, m.fkt_link,
+        m.wh_location, m.vrp, m.yield_value, m.p_type, m.p_size,
+        m.fk_grade, m.fkqc_remark, m.invoice_date
+      FROM inbound i
+      LEFT JOIN master_data m ON UPPER(TRIM(i.wsn)) = UPPER(TRIM(m.wsn))
+      WHERE i.warehouse_id = $1
+        AND NOT EXISTS (SELECT 1 FROM qc q WHERE UPPER(TRIM(q.wsn)) = UPPER(TRIM(i.wsn)))
+        AND NOT EXISTS (SELECT 1 FROM picking p WHERE UPPER(TRIM(p.wsn)) = UPPER(TRIM(i.wsn)))
+        AND NOT EXISTS (SELECT 1 FROM outbound o WHERE UPPER(TRIM(o.wsn)) = UPPER(TRIM(i.wsn)))
+
+      ORDER BY picked_date DESC
+    `;
+
+    const result = await query(sql, [warehouseId]);
+    console.log(`✅ Found ${result.rows.length} available inventory items for outbound`);
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error('❌ Available inventory error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // ====== GET SOURCE BY WSN (PICKING → QC → INBOUND) ======
 export const getSourceByWSN = async (req: Request, res: Response) => {
   try {
