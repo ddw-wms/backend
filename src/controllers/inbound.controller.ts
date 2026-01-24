@@ -240,6 +240,16 @@ export const bulkInboundUpload = async (req: Request, res: Response) => {
 const normalizeDate = (val: any): string | null => {
   if (!val && val !== 0) return null;
 
+  // ✅ Handle JS Date objects
+  if (val instanceof Date) {
+    // Convert JS Date to YYYY-MM-DD (UTC)
+    const year = val.getUTCFullYear();
+    const month = String(val.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(val.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+
   // ✅ Excel SERIAL NUMBER - WITHOUT timezone conversion
   if (typeof val === 'number' && val > 0) {
     // Excel epoch: December 30, 1899
