@@ -8,40 +8,6 @@ dns.setDefaultResultOrder('ipv4first');
 let pool: Pool | null = null;
 let reconnecting = false;
 let dbReady = false;
-let lastSuccessfulQuery: Date | null = null;
-let healthCheckInterval: NodeJS.Timeout | null = null;
-let keepAliveInterval: NodeJS.Timeout | null = null;
-
-// Configuration
-const HEALTH_CHECK_INTERVAL = 15000; // 15 seconds - more frequent
-const KEEP_ALIVE_INTERVAL = 45000; // 45 seconds - keep connection warm
-const MAX_RECONNECT_ATTEMPTS = 10;
-
-// Create a new pool with optimized settings
-function createPool(dbUrl: string): Pool {
-  const isPgBouncer = dbUrl.includes('pgbouncer=true') || dbUrl.includes(':6543');
-
-  return new Pool({
-    connectionString: dbUrl,
-    ssl: { rejectUnauthorized: false },
-
-    // Connection settings - CRITICAL for Supabase
-    keepAlive: true,
-    keepAliveInitialDelayMillis: 5000, // Start keepalive quickly
-
-    // Pool settings - conservative for stability
-    max: 3,  // Fewer connections = more stable
-    min: 0,  // Allow pool to shrink
-    idleTimeoutMillis: 60000, // 1 minute idle
-    connectionTimeoutMillis: 30000, // 30 sec to connect
-    allowExitOnIdle: false,
-
-    // For PgBouncer transaction mode
-    ...(isPgBouncer && {
-      application_name: 'wms_backend',
-    }),
-  });
-}
 
 export const initializeDatabase = async (): Promise<Pool> => {
   const dbUrl = process.env.DATABASE_URL;
@@ -50,185 +16,140 @@ export const initializeDatabase = async (): Promise<Pool> => {
     process.exit(1);
   }
 
-  // Already connected and healthy
-  if (pool && dbReady) {
-    return pool;
-  }
+  if (pool && dbReady) return pool;
 
-  // Cleanup old pool
-  if (pool) {
-    try { await pool.end(); } catch { }
-    pool = null;
-  }
+  logger.info("Initializing database pool...");
 
-  logger.info("Initializing database connection...");
+  const isPgBouncer = dbUrl.includes('pgbouncer=true') || dbUrl.includes(':6543');
 
-  const newPool = createPool(dbUrl);
+  const
+    newPool = new Pool({
+      connectionString: dbUrl,
+      // SSL configuration - Supabase uses self-signed certs, so we must allow them
+      // For strict SSL with custom CA, set DB_SSL_CA environment variable
+      ssl: process.env.DB_SSL_CA
+        ? { rejectUnauthorized: true, ca: process.env.DB_SSL_CA }
+        : { rejectUnauthorized: false },
 
-  // Test connection
+      // MOST IMPORTANT for Supabase/Remote DB:
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
+
+      // Pool configuration - OPTIMIZED for Supabase FREE TIER
+      max: isPgBouncer ? 3 : 5,   // Fewer connections for PgBouncer/Transaction mode
+      min: 0,    // Don't keep any minimum connections (let PgBouncer manage)
+      idleTimeoutMillis: 5000,   // Release idle connections very quickly (5 seconds)
+      connectionTimeoutMillis: 30000,  // 30 seconds to connect
+      allowExitOnIdle: true,  // Release all connections when idle
+
+      // CRITICAL for Supabase Transaction Mode (PgBouncer)
+      // Disable prepared statements - they don't work with PgBouncer transaction mode
+      ...(isPgBouncer && {
+        statement_timeout: undefined,
+        query_timeout: undefined,
+      }),
+    });
+
+  // test connection before assigning
   try {
-    const result = await newPool.query("SELECT NOW() as time");
-    logger.info("Database Connected", { time: result.rows[0].time });
+    const test = await newPool.query("SELECT NOW()");
+    logger.info("Database Connected Successfully", { connectedAt: test.rows[0].now });
 
     pool = newPool;
     dbReady = true;
-    lastSuccessfulQuery = new Date();
 
-    // Setup error handler
-    pool.on("error", (err) => {
-      logger.error("Pool error", { message: err.message });
-      triggerReconnect();
-    });
-
-    // Start health monitoring
-    startHealthMonitoring();
+    newPool.on("error", handlePoolError);
 
     return pool;
-  } catch (err: any) {
-    logger.error("Connection failed", { error: err.message });
-    try { await newPool.end(); } catch { }
+  } catch (err) {
+    logger.error("Database connection failed", err as Error);
+    dbReady = false;
+
+    setTimeout(() => initializeDatabase().catch((e) => logger.error("Reconnection attempt failed", e)), 5000);
+
     throw err;
   }
 };
 
-// Health monitoring - detect and fix silent disconnections
-function startHealthMonitoring() {
-  // Clear existing intervals
-  if (healthCheckInterval) clearInterval(healthCheckInterval);
-  if (keepAliveInterval) clearInterval(keepAliveInterval);
+async function handlePoolError(err: Error) {
+  logger.warn("Database pool error", { message: err.message });
 
-  // Health check - verify connection works
-  healthCheckInterval = setInterval(async () => {
-    if (!pool || reconnecting) return;
-
-    try {
-      const start = Date.now();
-      await pool.query("SELECT 1");
-      const latency = Date.now() - start;
-
-      lastSuccessfulQuery = new Date();
-
-      // Log if latency is high
-      if (latency > 5000) {
-        logger.warn("High database latency", { latency });
-      }
-    } catch (err: any) {
-      logger.warn("Health check failed", { error: err.message });
-      triggerReconnect();
-    }
-  }, HEALTH_CHECK_INTERVAL);
-
-  // Keep-alive ping - prevent idle disconnection
-  keepAliveInterval = setInterval(async () => {
-    if (!pool || !dbReady || reconnecting) return;
-
-    try {
-      // Simple ping to keep connection warm
-      await pool.query("SELECT 1");
-    } catch {
-      // Ignore - health check will handle it
-    }
-  }, KEEP_ALIVE_INTERVAL);
-
-  // Allow process to exit
-  healthCheckInterval.unref();
-  keepAliveInterval.unref();
-}
-
-// Reconnection handler
-async function triggerReconnect() {
   if (reconnecting) return;
-
   reconnecting = true;
   dbReady = false;
 
-  logger.info("Starting database reconnection...");
+  logger.info("Attempting to reconnect in 5s...");
 
-  // Stop monitoring during reconnect
-  if (healthCheckInterval) clearInterval(healthCheckInterval);
-  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  try {
+    await pool?.end();
+  } catch { }
 
-  // Close old pool
-  const oldPool = pool;
   pool = null;
-  try { await oldPool?.end(); } catch { }
 
-  // Reconnect with retries
-  for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+  setTimeout(async () => {
     try {
       await initializeDatabase();
-      logger.info("Database reconnected", { attempt });
+      logger.info("Database reconnected");
+    } catch (e) {
+      logger.error("Reconnection failed", e as Error);
+    } finally {
       reconnecting = false;
-      return;
-    } catch (err: any) {
-      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30000);
-      logger.warn(`Reconnect attempt ${attempt} failed, retrying in ${delay}ms...`, {
-        error: err.message,
-      });
-      await new Promise(r => setTimeout(r, delay));
     }
-  }
-
-  logger.error("All reconnection attempts failed");
-  reconnecting = false;
+  }, 5000);
 }
 
-// Get pool - throws if not ready
 export const getPool = (): Pool => {
-  if (!pool || !dbReady) {
+  if (!dbReady || !pool) {
     throw new Error("Database not ready");
   }
   return pool;
 };
 
-// Query with automatic retry
-export const query = async (text: string, params?: any[], maxRetries = 2) => {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+export const query = async (text: string, params?: any[], retries = 2) => {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      // Wait for reconnection if in progress
-      if (reconnecting) {
-        await new Promise(r => setTimeout(r, 1000));
-        if (reconnecting) continue;
-      }
-
       const p = getPool();
-      const result = await p.query(text, params);
-      lastSuccessfulQuery = new Date();
-      return result;
-
+      return await p.query(text, params);
     } catch (error: any) {
-      // Don't retry constraint/syntax errors
-      const noRetry = ['23505', '23503', '42601', '42501'].includes(error.code);
-      if (noRetry) throw error;
+      lastError = error;
 
-      // Connection error - trigger reconnect
-      const isConnError =
-        error.message?.includes('not ready') ||
-        error.message?.includes('Connection terminated') ||
-        error.message?.includes('ECONNRESET') ||
-        error.code === '57P01';
-
-      if (isConnError && !reconnecting) {
-        triggerReconnect();
+      // Don't retry on syntax errors or constraint violations
+      if (error.code === '42601' || error.code === '23505' || error.code === '23503') {
+        throw error;
       }
 
-      // Last attempt - throw
-      if (attempt >= maxRetries) throw error;
+      // Retry on connection/timeout errors
+      if (attempt < retries && (
+        error.message?.includes('timeout') ||
+        error.message?.includes('ECONNRESET') ||
+        error.message?.includes('connection') ||
+        error.code === 'ECONNREFUSED'
+      )) {
+        console.log(`⚠️ Query attempt ${attempt + 1} failed, retrying in 1s...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
 
-      // Wait before retry
-      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      throw error;
     }
   }
 
-  throw new Error("Query failed after retries");
+  throw lastError;
+};
+
+// Simple query without retry (for performance-critical operations)
+export const queryNoRetry = async (text: string, params?: any[]) => {
+  const p = getPool();
+  return p.query(text, params);
 };
 
 export const isDbReady = () => dbReady;
 
-export const getConnectionStatus = () => ({
-  ready: dbReady,
-  reconnecting,
-  lastSuccessfulQuery,
-});
-
-export default { initializeDatabase, getPool, query, isDbReady, getConnectionStatus };
+export default {
+  initializeDatabase,
+  getPool,
+  query,
+  isDbReady,
+};
