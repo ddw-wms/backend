@@ -1,9 +1,17 @@
 // File Path = warehouse-backend/src/config/database.ts
 import { Pool, PoolClient } from 'pg';
 import dns from 'dns';
+import { lookup } from 'dns/promises';
 import logger from '../utils/logger';
 
+// CRITICAL: Force IPv4 for Supabase Session Pooler
+// Render uses IPv6 by default, but Supabase pooler only supports IPv4
 dns.setDefaultResultOrder('ipv4first');
+
+// Also set environment variable as backup
+process.env.NODE_OPTIONS = process.env.NODE_OPTIONS
+  ? `${process.env.NODE_OPTIONS} --dns-result-order=ipv4first`
+  : '--dns-result-order=ipv4first';
 
 let pool: Pool | null = null;
 let reconnecting = false;
@@ -31,7 +39,7 @@ let connectionHealth: ConnectionHealth = {
 export const getConnectionHealth = () => ({ ...connectionHealth, dbReady, lastSuccessfulQuery });
 
 export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
-  const dbUrl = process.env.DATABASE_URL;
+  let dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) {
     logger.error("DATABASE_URL not set");
     throw new Error("DATABASE_URL environment variable is not set");
@@ -39,13 +47,43 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
   if (pool && dbReady) return pool;
 
+  // CRITICAL: Add sslmode and pgbouncer params if not present (required for Supabase)
+  const urlObj = new URL(dbUrl);
+  const searchParams = urlObj.searchParams;
+
+  // Add sslmode=require if not present
+  if (!searchParams.has('sslmode')) {
+    searchParams.set('sslmode', 'require');
+  }
+
+  // Detect if using Supabase Session Pooler
+  const isPooler = dbUrl.includes('pooler.supabase.com');
+
+  // Add pgbouncer=true for pooler connections
+  if (isPooler && !searchParams.has('pgbouncer')) {
+    searchParams.set('pgbouncer', 'true');
+  }
+
+  // Reconstruct URL with params
+  dbUrl = urlObj.toString();
+
   // Log connection attempt with masked URL for debugging
   const maskedUrl = dbUrl.replace(/:[^:@]+@/, ':****@');
   console.log(`[DB] Connecting to: ${maskedUrl}`);
   console.log(`[DB] Attempt ${retryCount + 1}/${MAX_RECONNECT_ATTEMPTS + 1}`);
 
-  // Detect if using Supabase Session Pooler (PgBouncer)
-  // Session pooler URLs contain: pooler.supabase.com OR pgbouncer=true OR port 6543
+  // DNS resolution test (for debugging)
+  const hostname = urlObj.hostname;
+  try {
+    console.log(`[DB] Resolving hostname: ${hostname}`);
+    const addresses = await lookup(hostname, { family: 4 });
+    console.log(`[DB] Resolved to IPv4: ${addresses.address}`);
+  } catch (dnsErr: any) {
+    console.error(`[DB] ❌ DNS lookup failed:`, dnsErr.message);
+    // Continue anyway - pg library will try to resolve
+  }
+
+  // Detect if using PgBouncer mode
   const isPgBouncer = dbUrl.includes('pgbouncer=true') ||
     dbUrl.includes(':6543') ||
     dbUrl.includes('pooler.supabase.com');
@@ -53,29 +91,29 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
   const newPool = new Pool({
     connectionString: dbUrl,
-    // SSL configuration - Supabase uses self-signed certs, so we must allow them
-    // For strict SSL with custom CA, set DB_SSL_CA environment variable
-    ssl: process.env.DB_SSL_CA
-      ? { rejectUnauthorized: true, ca: process.env.DB_SSL_CA }
-      : { rejectUnauthorized: false },
+    // SSL configuration - Supabase requires SSL
+    ssl: { rejectUnauthorized: false },
 
-    // MOST IMPORTANT for Supabase/Remote DB:
+    // CRITICAL for remote DB connections:
     keepAlive: true,
-    keepAliveInitialDelayMillis: 10000,
+    keepAliveInitialDelayMillis: 5000,
 
     // Pool configuration - OPTIMIZED for Supabase PRO + Render Free
-    max: isPgBouncer ? 5 : 8,   // Slightly more connections for Pro tier
+    max: isPgBouncer ? 3 : 5,   // Fewer connections to avoid overload
     min: 0,    // Don't require minimum connections during cold start
     idleTimeoutMillis: 30000,   // Keep connections for 30 seconds
-    connectionTimeoutMillis: 20000,  // 20 seconds timeout
+    connectionTimeoutMillis: 30000,  // 30 seconds timeout (Supabase can be slow)
     allowExitOnIdle: false,  // Keep pool alive even when idle
 
-    // CRITICAL for Supabase Transaction Mode (PgBouncer)
-    // Disable prepared statements - they don't work with PgBouncer transaction mode
+    // CRITICAL for PgBouncer - disable prepared statements
     ...(isPgBouncer && {
-      statement_timeout: undefined,
-      query_timeout: undefined,
+      // These options help with PgBouncer compatibility
     }),
+  });
+
+  // Set application_name for debugging in Supabase
+  newPool.on('connect', (client) => {
+    client.query("SET application_name = 'wms-backend-render'");
   });
 
   // test connection before assigning
