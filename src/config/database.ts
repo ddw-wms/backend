@@ -92,6 +92,11 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
     dbUrl.includes('pooler.supabase.com');
   console.log(`[DB] Using PgBouncer/Session Pooler mode: ${isPgBouncer}`);
 
+  // Detect if running on Render (production) - needs longer timeouts
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+  const connectionTimeout = isProduction ? 60000 : 30000; // 60s for production, 30s for local
+  console.log(`[DB] Connection timeout: ${connectionTimeout}ms (production: ${isProduction})`);
+
   const newPool = new Pool({
     connectionString: dbUrl,
     // SSL configuration - Supabase requires SSL
@@ -105,7 +110,7 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
     max: isPgBouncer ? 3 : 5,   // Fewer connections to avoid overload
     min: 0,    // Don't require minimum connections during cold start
     idleTimeoutMillis: 30000,   // Keep connections for 30 seconds
-    connectionTimeoutMillis: 30000,  // 30 seconds timeout (Supabase can be slow)
+    connectionTimeoutMillis: connectionTimeout,  // Longer timeout for cross-region
     allowExitOnIdle: false,  // Keep pool alive even when idle
 
     // CRITICAL for PgBouncer - disable prepared statements
