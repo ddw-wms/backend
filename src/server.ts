@@ -42,8 +42,7 @@ import { backupScheduler } from './services/backupScheduler';
 
 
 const app: Express = express();
-//const PORT = process.env.PORT || 5000;
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 5000;
 
 // Parse allowed origins from environment variable or use defaults
 const getAllowedOrigins = (): string[] => {
