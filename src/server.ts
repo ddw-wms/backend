@@ -35,7 +35,7 @@ import errorLogsRoutes from './routes/error-logs.routes';
 import sessionsRoutes from './routes/sessions.routes';
 import logger from './utils/logger';
 
-import { isDbReady } from "./config/database";
+import { isDbReady, checkDbHealth, getConnectionHealth, warmupConnection, forceReconnect } from "./config/database";
 import { apiTimeout } from './middleware/timeout.middleware';
 import { backupScheduler } from './services/backupScheduler';
 
@@ -104,15 +104,19 @@ app.use(compression({
   }
 }));
 
-// 🚧 Ensure DB is ready before hitting any API (skip check in tests and health endpoints)
+// 🚧 Ensure DB is ready before hitting any API (skip check in tests and health/wake endpoints)
 app.use((req, res, next) => {
   if (process.env.NODE_ENV === 'test') return next();
-  // Skip DB check for health endpoint (used for wake-up pings)
-  if (req.path === '/api/health') return next();
+  // Skip DB check for health, wake, and reconnect endpoints (used for monitoring and recovery)
+  if (req.path === '/api/health' || req.path === '/api/wake' || req.path === '/api/reconnect') return next();
+
   if (!isDbReady()) {
     return res.status(503).json({
-      error: "Database not ready. Reconnecting...",
-      timestamp: new Date()
+      error: "Server is starting up",
+      message: "The server is currently connecting to the database. Please try again in a moment.",
+      isRetryable: true,
+      retryAfterMs: 5000,
+      timestamp: new Date().toISOString()
     });
   }
   next();
@@ -207,8 +211,9 @@ app.use('/api/sessions', sessionsRoutes);
 // Health Check - Enhanced for production monitoring
 app.get('/api/health', async (req: Request, res: Response) => {
   try {
-    // Check database connectivity
-    const dbStatus = isDbReady() ? 'connected' : 'disconnected';
+    // Get detailed database health
+    const dbHealth = await checkDbHealth();
+    const connectionInfo = getConnectionHealth();
 
     // Memory usage
     const memoryUsage = process.memoryUsage();
@@ -218,19 +223,92 @@ app.get('/api/health', async (req: Request, res: Response) => {
       rss: Math.round(memoryUsage.rss / 1024 / 1024),
     };
 
+    // Determine overall status
+    let status: 'OK' | 'DEGRADED' | 'CONNECTING' | 'ERROR' = 'OK';
+    if (!connectionInfo.dbReady) {
+      status = 'CONNECTING';
+    } else if (!dbHealth.healthy) {
+      status = 'DEGRADED';
+    } else if (dbHealth.latencyMs > 5000) {
+      status = 'DEGRADED';
+    }
+
     res.json({
-      status: dbStatus === 'connected' ? 'OK' : 'DEGRADED',
-      timestamp: new Date(),
+      status,
+      timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
-      database: dbStatus,
+      database: {
+        ready: connectionInfo.dbReady,
+        healthy: dbHealth.healthy,
+        latencyMs: dbHealth.latencyMs,
+        lastSuccessfulQuery: connectionInfo.lastSuccessfulQuery,
+        consecutiveFailures: connectionInfo.consecutiveFailures,
+        lastError: dbHealth.error || null,
+      },
       memory: memoryMB,
       uptime: Math.round(process.uptime()),
     });
-  } catch (error) {
+  } catch (error: any) {
     res.status(500).json({
       status: 'ERROR',
-      timestamp: new Date(),
-      error: 'Health check failed',
+      timestamp: new Date().toISOString(),
+      error: error.message || 'Health check failed',
+      database: { ready: false, healthy: false },
+    });
+  }
+});
+
+// Wake-up endpoint - Used by frontend to warm up the server after cold start
+app.post('/api/wake', async (req: Request, res: Response) => {
+  try {
+    const startTime = Date.now();
+
+    // Attempt to warm up the database connection
+    const warmedUp = await warmupConnection();
+    const dbHealth = await checkDbHealth();
+
+    const responseTime = Date.now() - startTime;
+
+    res.json({
+      success: warmedUp,
+      message: warmedUp
+        ? 'Server is ready'
+        : 'Server is starting up. Please retry in a moment.',
+      responseTimeMs: responseTime,
+      database: {
+        ready: dbHealth.healthy,
+        latencyMs: dbHealth.latencyMs,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.status(503).json({
+      success: false,
+      message: 'Server is starting up. Please retry in a moment.',
+      error: error.message,
+      isRetryable: true,
+      retryAfterMs: 5000,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Force reconnect endpoint (for manual recovery - requires admin)
+app.post('/api/reconnect', async (req: Request, res: Response) => {
+  try {
+    logger.info("Manual reconnection triggered");
+    const success = await forceReconnect();
+
+    res.json({
+      success,
+      message: success ? 'Database reconnected successfully' : 'Reconnection failed',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString(),
     });
   }
 });
