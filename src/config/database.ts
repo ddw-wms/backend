@@ -34,7 +34,7 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
   const dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) {
     logger.error("DATABASE_URL not set");
-    process.exit(1);
+    throw new Error("DATABASE_URL environment variable is not set");
   }
 
   if (pool && dbReady) return pool;
@@ -57,9 +57,9 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
     // Pool configuration - OPTIMIZED for Supabase PRO + Render Free
     max: isPgBouncer ? 5 : 8,   // Slightly more connections for Pro tier
-    min: 1,    // Keep at least 1 connection warm to reduce cold start latency
-    idleTimeoutMillis: 30000,   // Keep connections for 30 seconds (helps with Render cold starts)
-    connectionTimeoutMillis: 45000,  // 45 seconds to connect (Render cold start can take 30s+)
+    min: 0,    // Don't require minimum connections during cold start
+    idleTimeoutMillis: 30000,   // Keep connections for 30 seconds
+    connectionTimeoutMillis: 15000,  // 15 seconds - fail fast, retry quick
     allowExitOnIdle: false,  // Keep pool alive even when idle
 
     // CRITICAL for Supabase Transaction Mode (PgBouncer)
@@ -211,15 +211,30 @@ export const forceReconnect = async (): Promise<boolean> => {
 
 // Warm up connection (call on first request after cold start)
 export const warmupConnection = async (): Promise<boolean> => {
-  try {
-    if (!pool) {
-      await initializeDatabase();
+  // If database is already ready, just verify it works
+  if (pool && dbReady) {
+    try {
+      await pool.query("SELECT 1");
+      lastSuccessfulQuery = new Date();
+      connectionHealth.isHealthy = true;
+      return true;
+    } catch (err: any) {
+      logger.warn("Warmup query failed, attempting reconnection", { error: err.message });
+      // Fall through to reconnection
     }
+  }
 
-    // Run a simple query to ensure connection is ready
-    await pool?.query("SELECT 1");
-    lastSuccessfulQuery = new Date();
-    return true;
+  // Try to initialize/reconnect
+  try {
+    await initializeDatabase();
+
+    if (pool) {
+      await pool.query("SELECT 1");
+      lastSuccessfulQuery = new Date();
+      connectionHealth.isHealthy = true;
+      return true;
+    }
+    return false;
   } catch (err: any) {
     logger.warn("Warmup failed", { error: err.message });
     return false;

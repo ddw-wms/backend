@@ -263,24 +263,49 @@ app.post('/api/wake', async (req: Request, res: Response) => {
   try {
     const startTime = Date.now();
 
-    // Attempt to warm up the database connection
-    const warmedUp = await warmupConnection();
-    const dbHealth = await checkDbHealth();
+    // Try multiple times to warm up the connection
+    let warmedUp = false;
+    let lastError = null;
 
+    for (let attempt = 0; attempt < 3; attempt++) {
+      warmedUp = await warmupConnection();
+      if (warmedUp) break;
+
+      // Wait 2 seconds between attempts
+      if (attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+
+    const dbHealth = await checkDbHealth();
     const responseTime = Date.now() - startTime;
 
-    res.json({
-      success: warmedUp,
-      message: warmedUp
-        ? 'Server is ready'
-        : 'Server is starting up. Please retry in a moment.',
-      responseTimeMs: responseTime,
-      database: {
-        ready: dbHealth.healthy,
-        latencyMs: dbHealth.latencyMs,
-      },
-      timestamp: new Date().toISOString(),
-    });
+    if (warmedUp) {
+      res.json({
+        success: true,
+        message: 'Server is ready',
+        responseTimeMs: responseTime,
+        database: {
+          ready: dbHealth.healthy,
+          latencyMs: dbHealth.latencyMs,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Return 503 so frontend knows to retry
+      res.status(503).json({
+        success: false,
+        message: 'Server is starting up. Please retry in a moment.',
+        responseTimeMs: responseTime,
+        database: {
+          ready: false,
+          latencyMs: dbHealth.latencyMs,
+        },
+        isRetryable: true,
+        retryAfterMs: 5000,
+        timestamp: new Date().toISOString(),
+      });
+    }
   } catch (error: any) {
     res.status(503).json({
       success: false,
@@ -323,21 +348,48 @@ app.use(errorHandler);
 
 // Start Server (skip real DB init and listen when running tests)
 if (process.env.NODE_ENV !== 'test') {
-  (async () => {
+  // CRITICAL: Start HTTP server IMMEDIATELY - don't wait for anything
+  // Render needs to see the port binding within 60 seconds or deployment fails
+  console.log(`[STARTUP] Starting HTTP server on port ${PORT}...`);
+
+  const server = app.listen(PORT, () => {
+    // Use console.log for immediate output (logger might buffer)
+    console.log(`[STARTUP] ✅ Server listening on port ${PORT}`);
+    logger.info(`Server running on port ${PORT}`);
+  });
+
+  // Handle server errors
+  server.on('error', (err: any) => {
+    console.error(`[STARTUP] ❌ Server error:`, err.message);
+    process.exit(1);
+  });
+
+  // Initialize database in the background (non-blocking)
+  // Don't crash if database fails - keep retrying
+  const initDb = async (attempt = 0): Promise<void> => {
+    console.log(`[DB] Attempting database connection (attempt ${attempt + 1})...`);
+
     try {
       await initializeDatabase();
+      console.log(`[DB] ✅ Database connected successfully`);
+      logger.info("Database initialization complete");
 
-      // Initialize backup scheduler
+      // Initialize backup scheduler after DB is ready
       await backupScheduler.initialize();
+    } catch (err: any) {
+      console.error(`[DB] ❌ Database connection failed (attempt ${attempt + 1}):`, err.message);
+      logger.error(`Database initialization failed (attempt ${attempt + 1})`, err);
 
-      app.listen(PORT, () => {
-        logger.info(`Server running on port ${PORT}`);
-      });
-    } catch (err) {
-      logger.error('Failed to start server', err);
-      process.exit(1);
+      // Keep retrying with exponential backoff (max 30 seconds between retries)
+      const delay = Math.min(3000 * Math.pow(1.5, attempt), 30000);
+      console.log(`[DB] Retrying in ${Math.round(delay / 1000)}s...`);
+
+      setTimeout(() => initDb(attempt + 1), delay);
     }
-  })();
+  };
+
+  // Start database initialization after a tiny delay to ensure server is listening
+  setImmediate(() => initDb());
 } else {
   // In test environment, avoid starting DB connection and listener.
   // Tests set NODE_ENV=test and should stub or avoid DB access.
