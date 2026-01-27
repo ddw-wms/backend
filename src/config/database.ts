@@ -8,6 +8,9 @@ import logger from '../utils/logger';
 // Render uses IPv6 by default, but Supabase pooler only supports IPv4
 dns.setDefaultResultOrder('ipv4first');
 
+// CRITICAL: Allow self-signed certificates for Supabase
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Also set environment variable as backup
 process.env.NODE_OPTIONS = process.env.NODE_OPTIONS
   ? `${process.env.NODE_OPTIONS} --dns-result-order=ipv4first`
