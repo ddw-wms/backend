@@ -39,9 +39,17 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
   if (pool && dbReady) return pool;
 
-  logger.info("Initializing database pool...", { attempt: retryCount + 1 });
+  // Log connection attempt with masked URL for debugging
+  const maskedUrl = dbUrl.replace(/:[^:@]+@/, ':****@');
+  console.log(`[DB] Connecting to: ${maskedUrl}`);
+  console.log(`[DB] Attempt ${retryCount + 1}/${MAX_RECONNECT_ATTEMPTS + 1}`);
 
-  const isPgBouncer = dbUrl.includes('pgbouncer=true') || dbUrl.includes(':6543');
+  // Detect if using Supabase Session Pooler (PgBouncer)
+  // Session pooler URLs contain: pooler.supabase.com OR pgbouncer=true OR port 6543
+  const isPgBouncer = dbUrl.includes('pgbouncer=true') ||
+    dbUrl.includes(':6543') ||
+    dbUrl.includes('pooler.supabase.com');
+  console.log(`[DB] Using PgBouncer/Session Pooler mode: ${isPgBouncer}`);
 
   const newPool = new Pool({
     connectionString: dbUrl,
@@ -59,7 +67,7 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
     max: isPgBouncer ? 5 : 8,   // Slightly more connections for Pro tier
     min: 0,    // Don't require minimum connections during cold start
     idleTimeoutMillis: 30000,   // Keep connections for 30 seconds
-    connectionTimeoutMillis: 15000,  // 15 seconds - fail fast, retry quick
+    connectionTimeoutMillis: 20000,  // 20 seconds timeout
     allowExitOnIdle: false,  // Keep pool alive even when idle
 
     // CRITICAL for Supabase Transaction Mode (PgBouncer)
@@ -72,7 +80,9 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
   // test connection before assigning
   try {
+    console.log(`[DB] Testing connection with SELECT NOW()...`);
     const test = await newPool.query("SELECT NOW()");
+    console.log(`[DB] ✅ Connected successfully at ${test.rows[0].now}`);
     logger.info("Database Connected Successfully", { connectedAt: test.rows[0].now });
 
     pool = newPool;
@@ -93,6 +103,16 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
     return pool;
   } catch (err: any) {
+    console.error(`[DB] ❌ Connection failed:`, err.message);
+    console.error(`[DB] Error code:`, err.code);
+    console.error(`[DB] Full error:`, JSON.stringify({
+      message: err.message,
+      code: err.code,
+      errno: err.errno,
+      syscall: err.syscall,
+      hostname: err.hostname
+    }));
+
     logger.error("Database connection failed", err as Error, { attempt: retryCount + 1 });
     dbReady = false;
     connectionHealth = {
@@ -102,10 +122,15 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
       lastError: err.message,
     };
 
+    // Close the failed pool to release resources
+    try {
+      await newPool.end();
+    } catch { }
+
     // Exponential backoff for reconnection
     if (retryCount < MAX_RECONNECT_ATTEMPTS) {
       const delay = RECONNECT_DELAY_BASE * Math.pow(2, retryCount);
-      logger.info(`Retrying database connection in ${delay}ms...`, { attempt: retryCount + 1 });
+      console.log(`[DB] Retrying in ${delay}ms...`);
       await new Promise(resolve => setTimeout(resolve, delay));
       return initializeDatabase(retryCount + 1);
     }
