@@ -16,13 +16,16 @@ process.env.NODE_OPTIONS = process.env.NODE_OPTIONS
   ? `${process.env.NODE_OPTIONS} --dns-result-order=ipv4first`
   : '--dns-result-order=ipv4first';
 
+// CRITICAL: Disable connection keep-alive nagle algorithm for faster handshakes
+process.env.UV_TCP_NODELAY = '1';
+
 let pool: Pool | null = null;
 let reconnecting = false;
 let dbReady = false;
 let lastSuccessfulQuery: Date | null = null;
 let connectionAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_DELAY_BASE = 2000; // Start with 2 seconds
+const MAX_RECONNECT_ATTEMPTS = 10; // Increased for cross-region connections
+const RECONNECT_DELAY_BASE = 1500; // Start with 1.5 seconds
 
 // Track connection health
 interface ConnectionHealth {
@@ -41,8 +44,22 @@ let connectionHealth: ConnectionHealth = {
 
 export const getConnectionHealth = () => ({ ...connectionHealth, dbReady, lastSuccessfulQuery });
 
+// Track if we've tried the direct connection
+let triedDirectConnection = false;
+
 export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
+  // CRITICAL: Support both pooler and direct connection URLs
+  // Use DIRECT_DATABASE_URL as fallback for network issues
   let dbUrl = process.env.DATABASE_URL;
+  const directUrl = process.env.DIRECT_DATABASE_URL;
+
+  // After 3 failed attempts, try direct connection if available
+  if (retryCount >= 3 && directUrl && !triedDirectConnection) {
+    console.log(`[DB] ⚠️ Pooler connection failing. Trying DIRECT_DATABASE_URL...`);
+    dbUrl = directUrl;
+    triedDirectConnection = true;
+  }
+
   if (!dbUrl) {
     logger.error("DATABASE_URL not set");
     throw new Error("DATABASE_URL environment variable is not set");
@@ -65,6 +82,13 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
   // Add pgbouncer=true for pooler connections
   if (isPooler && !searchParams.has('pgbouncer')) {
     searchParams.set('pgbouncer', 'true');
+  }
+
+  // CRITICAL: For cross-region connections, use Transaction Pooler (port 6543) instead of Session Pooler (port 5432)
+  // Transaction mode has better connection handling and lower latency
+  if (isPooler && urlObj.port === '5432') {
+    console.log(`[DB] ⚠️ Switching from Session Pooler (5432) to Transaction Pooler (6543) for better reliability`);
+    urlObj.port = '6543';
   }
 
   // Reconstruct URL with params
@@ -90,31 +114,35 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
   const isPgBouncer = dbUrl.includes('pgbouncer=true') ||
     dbUrl.includes(':6543') ||
     dbUrl.includes('pooler.supabase.com');
-  console.log(`[DB] Using PgBouncer/Session Pooler mode: ${isPgBouncer}`);
+  console.log(`[DB] Using PgBouncer/Transaction Pooler mode: ${isPgBouncer}`);
 
-  // Detect if running on Render (production) - needs longer timeouts
+  // Detect if running on Render (production) - needs longer timeouts for cross-region
   const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
-  const connectionTimeout = isProduction ? 60000 : 30000; // 60s for production, 30s for local
+  // CRITICAL: Use shorter initial connection timeout but more aggressive retries
+  // Long timeouts cause Render to think the service is hanging
+  const connectionTimeout = 30000; // 30s - balanced for cross-region without blocking too long
+  const acquireTimeout = 20000; // Timeout for acquiring a connection from pool
   console.log(`[DB] Connection timeout: ${connectionTimeout}ms (production: ${isProduction})`);
 
   const newPool = new Pool({
     connectionString: dbUrl,
     ssl: { rejectUnauthorized: false },
 
+    // CRITICAL: TCP keepalive settings for cross-region connections
     keepAlive: true,
-    keepAliveInitialDelayMillis: 3000,
+    keepAliveInitialDelayMillis: 1000, // Send keepalive after 1s of idle (faster detection)
 
-    max: isPgBouncer ? 5 : 7,
+    // CRITICAL: Pool size optimized for PgBouncer Transaction mode
+    // Transaction mode multiplexes connections, so we need fewer client-side connections
+    max: isPgBouncer ? 3 : 5, // Reduced - PgBouncer handles pooling
     min: 1,
-    idleTimeoutMillis: 120000,
+    idleTimeoutMillis: 60000, // Close idle connections after 60s (save resources)
     connectionTimeoutMillis: connectionTimeout,
     allowExitOnIdle: false,
 
-    query_timeout: 30000,
-    statement_timeout: 30000,
-
-    ...(isPgBouncer && {
-    }),
+    // Query timeouts
+    query_timeout: 25000, // 25s query timeout
+    statement_timeout: 25000,
   });
 
   // Set application_name for debugging in Supabase
@@ -122,8 +150,9 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
     client.query("SET application_name = 'wms-backend-render'");
   });
 
-  // Keep-alive ping every 10 seconds to prevent timeout
-  setInterval(async () => {
+  // Keep-alive ping every 20 seconds to prevent timeout
+  // CRITICAL: Use a separate lightweight query to maintain connection
+  const keepAliveInterval = setInterval(async () => {
     if (pool && dbReady) {
       try {
         await pool.query('SELECT 1');
@@ -131,7 +160,10 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
         // Ignore - health check will handle reconnection
       }
     }
-  }, 10000);
+  }, 20000);
+
+  // Prevent interval from keeping Node.js process alive
+  keepAliveInterval.unref();
 
   // test connection before assigning
   try {
@@ -182,10 +214,13 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
       await newPool.end();
     } catch { }
 
-    // Exponential backoff for reconnection
+    // CRITICAL: Shorter exponential backoff with jitter for cross-region connections
+    // Faster retries with randomization to avoid thundering herd
     if (retryCount < MAX_RECONNECT_ATTEMPTS) {
-      const delay = RECONNECT_DELAY_BASE * Math.pow(2, retryCount);
-      console.log(`[DB] Retrying in ${delay}ms...`);
+      const baseDelay = RECONNECT_DELAY_BASE * Math.pow(1.5, retryCount); // 1.5x growth instead of 2x
+      const jitter = Math.random() * 1000; // Add up to 1s random jitter
+      const delay = Math.min(baseDelay + jitter, 15000); // Cap at 15 seconds
+      console.log(`[DB] Retrying in ${Math.round(delay)}ms...`);
       await new Promise(resolve => setTimeout(resolve, delay));
       return initializeDatabase(retryCount + 1);
     }
