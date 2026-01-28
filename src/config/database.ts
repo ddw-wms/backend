@@ -99,23 +99,21 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
 
   const newPool = new Pool({
     connectionString: dbUrl,
-    // SSL configuration - Supabase requires SSL
     ssl: { rejectUnauthorized: false },
 
-    // CRITICAL for remote DB connections:
     keepAlive: true,
-    keepAliveInitialDelayMillis: 5000,
+    keepAliveInitialDelayMillis: 3000,  // ✏️ CHANGED: 5000 → 3000
 
-    // Pool configuration - OPTIMIZED for Supabase PRO + Render Free
-    max: isPgBouncer ? 3 : 5,   // Fewer connections to avoid overload
-    min: 0,    // Don't require minimum connections during cold start
-    idleTimeoutMillis: 30000,   // Keep connections for 30 seconds
-    connectionTimeoutMillis: connectionTimeout,  // Longer timeout for cross-region
-    allowExitOnIdle: false,  // Keep pool alive even when idle
+    max: isPgBouncer ? 5 : 7,  // ✏️ CHANGED: 3 → 5
+    min: 1,  // ✏️ CHANGED: 0 → 1
+    idleTimeoutMillis: 120000,  // ✏️ CHANGED: 30000 → 120000
+    connectionTimeoutMillis: connectionTimeout,
+    allowExitOnIdle: false,
 
-    // CRITICAL for PgBouncer - disable prepared statements
+    query_timeout: 30000,  // ✏️ ADDED (new line)
+    statement_timeout: 30000,  // ✏️ ADDED (new line)
+
     ...(isPgBouncer && {
-      // These options help with PgBouncer compatibility
     }),
   });
 
@@ -124,294 +122,317 @@ export const initializeDatabase = async (retryCount = 0): Promise<Pool> => {
     client.query("SET application_name = 'wms-backend-render'");
   });
 
-  // test connection before assigning
-  try {
-    console.log(`[DB] Testing connection with SELECT NOW()...`);
-    const test = await newPool.query("SELECT NOW()");
-    console.log(`[DB] ✅ Connected successfully at ${test.rows[0].now}`);
-    logger.info("Database Connected Successfully", { connectedAt: test.rows[0].now });
-
-    pool = newPool;
-    dbReady = true;
-    connectionAttempts = 0;
-    connectionHealth = {
-      isHealthy: true,
-      lastCheck: new Date(),
-      consecutiveFailures: 0,
-      lastError: null,
-    };
-    lastSuccessfulQuery = new Date();
-
-    newPool.on("error", handlePoolError);
-
-    // Start periodic health check
-    startHealthCheck();
-
-    return pool;
-  } catch (err: any) {
-    console.error(`[DB] ❌ Connection failed:`, err.message);
-    console.error(`[DB] Error code:`, err.code);
-    console.error(`[DB] Full error:`, JSON.stringify({
-      message: err.message,
-      code: err.code,
-      errno: err.errno,
-      syscall: err.syscall,
-      hostname: err.hostname
-    }));
-
-    logger.error("Database connection failed", err as Error, { attempt: retryCount + 1 });
-    dbReady = false;
-    connectionHealth = {
-      isHealthy: false,
-      lastCheck: new Date(),
-      consecutiveFailures: connectionHealth.consecutiveFailures + 1,
-      lastError: err.message,
-    };
-
-    // Close the failed pool to release resources
-    try {
-      await newPool.end();
-    } catch { }
-
-    // Exponential backoff for reconnection
-    if (retryCount < MAX_RECONNECT_ATTEMPTS) {
-      const delay = RECONNECT_DELAY_BASE * Math.pow(2, retryCount);
-      console.log(`[DB] Retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return initializeDatabase(retryCount + 1);
-    }
-
-    throw err;
-  }
-};
-
-// Periodic health check to maintain connection
-let healthCheckInterval: NodeJS.Timeout | null = null;
-
-function startHealthCheck() {
-  if (healthCheckInterval) clearInterval(healthCheckInterval);
-
-  // Check connection health every 30 seconds
-  healthCheckInterval = setInterval(async () => {
-    if (!pool || !dbReady) return;
-
-    try {
-      await pool.query("SELECT 1");
-      connectionHealth.isHealthy = true;
-      connectionHealth.lastCheck = new Date();
-      connectionHealth.consecutiveFailures = 0;
-      lastSuccessfulQuery = new Date();
-    } catch (err: any) {
-      logger.warn("Health check failed", { error: err.message });
-      connectionHealth.consecutiveFailures++;
-      connectionHealth.lastError = err.message;
-
-      // If 3 consecutive failures, trigger reconnection
-      if (connectionHealth.consecutiveFailures >= 3) {
-        connectionHealth.isHealthy = false;
-        handlePoolError(err);
+  // ✏️ ADD THESE LINES (new code):
+  // Keep-alive ping every 10 seconds to prevent timeout
+  setInterval(async () => {
+    if (pool && dbReady) {
+      try {
+        await pool.query('SELECT 1');
+      } catch (err) {
+        // Ignore - health check will handle reconnection
       }
     }
-  }, 30000);
-}
+  }, 10000);
 
-async function handlePoolError(err: Error) {
-  logger.warn("Database pool error", { message: err.message });
-
-  if (reconnecting) return;
-  reconnecting = true;
-  dbReady = false;
-  connectionHealth.isHealthy = false;
-
-  logger.info("Attempting to reconnect with exponential backoff...");
-
+  // test connection before assigning
   try {
-    await pool?.end();
-  } catch { }
 
-  pool = null;
 
-  // Reconnect with exponential backoff
-  const reconnect = async (attempt = 0) => {
-    if (attempt >= MAX_RECONNECT_ATTEMPTS) {
-      logger.error("Max reconnection attempts reached. Manual intervention required.");
-      reconnecting = false;
-      return;
-    }
 
-    const delay = RECONNECT_DELAY_BASE * Math.pow(2, attempt);
-    logger.info(`Reconnection attempt ${attempt + 1} in ${delay}ms...`);
+    // Set application_name for debugging in Supabase
+    newPool.on('connect', (client) => {
+      client.query("SET application_name = 'wms-backend-render'");
+    });
 
-    await new Promise(resolve => setTimeout(resolve, delay));
-
+    // test connection before assigning
     try {
-      await initializeDatabase();
-      logger.info("Database reconnected successfully");
-      reconnecting = false;
-    } catch (e: any) {
-      logger.error("Reconnection failed", e as Error, { attempt: attempt + 1 });
-      await reconnect(attempt + 1);
+      console.log(`[DB] Testing connection with SELECT NOW()...`);
+      const test = await newPool.query("SELECT NOW()");
+      console.log(`[DB] ✅ Connected successfully at ${test.rows[0].now}`);
+      logger.info("Database Connected Successfully", { connectedAt: test.rows[0].now });
+
+      pool = newPool;
+      dbReady = true;
+      connectionAttempts = 0;
+      connectionHealth = {
+        isHealthy: true,
+        lastCheck: new Date(),
+        consecutiveFailures: 0,
+        lastError: null,
+      };
+      lastSuccessfulQuery = new Date();
+
+      newPool.on("error", handlePoolError);
+
+      // Start periodic health check
+      startHealthCheck();
+
+      return pool;
+    } catch (err: any) {
+      console.error(`[DB] ❌ Connection failed:`, err.message);
+      console.error(`[DB] Error code:`, err.code);
+      console.error(`[DB] Full error:`, JSON.stringify({
+        message: err.message,
+        code: err.code,
+        errno: err.errno,
+        syscall: err.syscall,
+        hostname: err.hostname
+      }));
+
+      logger.error("Database connection failed", err as Error, { attempt: retryCount + 1 });
+      dbReady = false;
+      connectionHealth = {
+        isHealthy: false,
+        lastCheck: new Date(),
+        consecutiveFailures: connectionHealth.consecutiveFailures + 1,
+        lastError: err.message,
+      };
+
+      // Close the failed pool to release resources
+      try {
+        await newPool.end();
+      } catch { }
+
+      // Exponential backoff for reconnection
+      if (retryCount < MAX_RECONNECT_ATTEMPTS) {
+        const delay = RECONNECT_DELAY_BASE * Math.pow(2, retryCount);
+        console.log(`[DB] Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return initializeDatabase(retryCount + 1);
+      }
+
+      throw err;
     }
   };
 
-  reconnect();
-}
+  // Periodic health check to maintain connection
+  let healthCheckInterval: NodeJS.Timeout | null = null;
 
-// Force reconnection (can be called from health endpoint)
-export const forceReconnect = async (): Promise<boolean> => {
-  logger.info("Forcing database reconnection...");
+  function startHealthCheck() {
+    if (healthCheckInterval) clearInterval(healthCheckInterval);
 
-  try {
-    if (pool) {
-      await pool.end();
-    }
-  } catch { }
+    // Check connection health every 15 seconds  // ✏️ CHANGED comment
+    healthCheckInterval = setInterval(async () => {
+      if (!pool || !dbReady) return;
 
-  pool = null;
-  dbReady = false;
-  reconnecting = false;
+      try {
+        await pool.query("SELECT 1");
+        connectionHealth.isHealthy = true;
+        connectionHealth.lastCheck = new Date();
+        connectionHealth.consecutiveFailures = 0;
+        lastSuccessfulQuery = new Date();
+      } catch (err: any) {
+        logger.warn("Health check failed", { error: err.message });
+        connectionHealth.consecutiveFailures++;
+        connectionHealth.lastError = err.message;
 
-  try {
-    await initializeDatabase();
-    return true;
-  } catch (err) {
-    logger.error("Force reconnection failed", err as Error);
-    return false;
+        // If 2 consecutive failures, trigger reconnection  // ✏️ CHANGED: 3 → 2
+        if (connectionHealth.consecutiveFailures >= 2) {
+          connectionHealth.isHealthy = true;
+          handlePoolError(err);
+        }
+      }
+    }, 15000);  // ✏️ CHANGED: 30000 → 15000
   }
-};
 
-// Warm up connection (call on first request after cold start)
-export const warmupConnection = async (): Promise<boolean> => {
-  // If database is already ready, just verify it works
-  if (pool && dbReady) {
+
+  async function handlePoolError(err: Error) {
+    logger.warn("Database pool error", { message: err.message });
+
+    if (reconnecting) return;
+    reconnecting = true;
+    dbReady = false;
+    connectionHealth.isHealthy = false;
+
+    logger.info("Attempting to reconnect with exponential backoff...");
+
     try {
-      await pool.query("SELECT 1");
-      lastSuccessfulQuery = new Date();
-      connectionHealth.isHealthy = true;
+      await pool?.end();
+    } catch { }
+
+    pool = null;
+
+    // Reconnect with exponential backoff
+    const reconnect = async (attempt = 0) => {
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        logger.error("Max reconnection attempts reached. Manual intervention required.");
+        reconnecting = false;
+        return;
+      }
+
+      const delay = RECONNECT_DELAY_BASE * Math.pow(2, attempt);
+      logger.info(`Reconnection attempt ${attempt + 1} in ${delay}ms...`);
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+
+      try {
+        await initializeDatabase();
+        logger.info("Database reconnected successfully");
+        reconnecting = false;
+      } catch (e: any) {
+        logger.error("Reconnection failed", e as Error, { attempt: attempt + 1 });
+        await reconnect(attempt + 1);
+      }
+    };
+
+    reconnect();
+  }
+
+  // Force reconnection (can be called from health endpoint)
+  export const forceReconnect = async (): Promise<boolean> => {
+    logger.info("Forcing database reconnection...");
+
+    try {
+      if (pool) {
+        await pool.end();
+      }
+    } catch { }
+
+    pool = null;
+    dbReady = false;
+    reconnecting = false;
+
+    try {
+      await initializeDatabase();
       return true;
+    } catch (err) {
+      logger.error("Force reconnection failed", err as Error);
+      return false;
+    }
+  };
+
+  // Warm up connection (call on first request after cold start)
+  export const warmupConnection = async (): Promise<boolean> => {
+    // If database is already ready, just verify it works
+    if (pool && dbReady) {
+      try {
+        await pool.query("SELECT 1");
+        lastSuccessfulQuery = new Date();
+        connectionHealth.isHealthy = true;
+        return true;
+      } catch (err: any) {
+        logger.warn("Warmup query failed, attempting reconnection", { error: err.message });
+        // Fall through to reconnection
+      }
+    }
+
+    // Try to initialize/reconnect
+    try {
+      await initializeDatabase();
+
+      if (pool) {
+        await pool.query("SELECT 1");
+        lastSuccessfulQuery = new Date();
+        connectionHealth.isHealthy = true;
+        return true;
+      }
+      return false;
     } catch (err: any) {
-      logger.warn("Warmup query failed, attempting reconnection", { error: err.message });
-      // Fall through to reconnection
+      logger.warn("Warmup failed", { error: err.message });
+      return false;
     }
-  }
+  };
 
-  // Try to initialize/reconnect
-  try {
-    await initializeDatabase();
-
-    if (pool) {
-      await pool.query("SELECT 1");
-      lastSuccessfulQuery = new Date();
-      connectionHealth.isHealthy = true;
-      return true;
+  export const getPool = (): Pool => {
+    if (!dbReady || !pool) {
+      throw new Error("Database not ready. The server is reconnecting. Please try again in a moment.");
     }
-    return false;
-  } catch (err: any) {
-    logger.warn("Warmup failed", { error: err.message });
-    return false;
-  }
-};
+    return pool;
+  };
 
-export const getPool = (): Pool => {
-  if (!dbReady || !pool) {
-    throw new Error("Database not ready. The server is reconnecting. Please try again in a moment.");
-  }
-  return pool;
-};
+  export const query = async (text: string, params?: any[], retries = 3) => {
+    let lastError: Error | null = null;
 
-export const query = async (text: string, params?: any[], retries = 3) => {
-  let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const p = getPool();
+        const result = await p.query(text, params);
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const p = getPool();
-      const result = await p.query(text, params);
+        // Update health tracking on success
+        lastSuccessfulQuery = new Date();
+        connectionHealth.isHealthy = true;
+        connectionHealth.consecutiveFailures = 0;
 
-      // Update health tracking on success
-      lastSuccessfulQuery = new Date();
-      connectionHealth.isHealthy = true;
-      connectionHealth.consecutiveFailures = 0;
+        return result;
+      } catch (error: any) {
+        lastError = error;
 
-      return result;
-    } catch (error: any) {
-      lastError = error;
+        // Don't retry on syntax errors or constraint violations
+        if (error.code === '42601' || error.code === '23505' || error.code === '23503') {
+          throw error;
+        }
 
-      // Don't retry on syntax errors or constraint violations
-      if (error.code === '42601' || error.code === '23505' || error.code === '23503') {
+        // Retry on connection/timeout errors with exponential backoff
+        const isRetryableError = (
+          error.message?.includes('timeout') ||
+          error.message?.includes('ECONNRESET') ||
+          error.message?.includes('connection') ||
+          error.message?.includes('Database not ready') ||
+          error.code === 'ECONNREFUSED' ||
+          error.code === 'ETIMEDOUT' ||
+          error.code === '57P01' || // admin_shutdown
+          error.code === '57P02' || // crash_shutdown
+          error.code === '57P03'    // cannot_connect_now
+        );
+
+        if (attempt < retries && isRetryableError) {
+          const delay = 1000 * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+          logger.warn(`Query attempt ${attempt + 1} failed, retrying in ${delay}ms...`, {
+            error: error.message,
+            code: error.code
+          });
+
+          connectionHealth.consecutiveFailures++;
+
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
         throw error;
       }
+    }
 
-      // Retry on connection/timeout errors with exponential backoff
-      const isRetryableError = (
-        error.message?.includes('timeout') ||
-        error.message?.includes('ECONNRESET') ||
-        error.message?.includes('connection') ||
-        error.message?.includes('Database not ready') ||
-        error.code === 'ECONNREFUSED' ||
-        error.code === 'ETIMEDOUT' ||
-        error.code === '57P01' || // admin_shutdown
-        error.code === '57P02' || // crash_shutdown
-        error.code === '57P03'    // cannot_connect_now
-      );
+    throw lastError;
+  };
 
-      if (attempt < retries && isRetryableError) {
-        const delay = 1000 * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
-        logger.warn(`Query attempt ${attempt + 1} failed, retrying in ${delay}ms...`, {
-          error: error.message,
-          code: error.code
-        });
+  // Simple query without retry (for performance-critical operations)
+  export const queryNoRetry = async (text: string, params?: any[]) => {
+    const p = getPool();
+    return p.query(text, params);
+  };
 
-        connectionHealth.consecutiveFailures++;
+  // Check if database is ready and responsive
+  export const checkDbHealth = async (): Promise<{ healthy: boolean; latencyMs: number; error?: string }> => {
+    const startTime = Date.now();
 
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
+    try {
+      if (!pool || !dbReady) {
+        return { healthy: false, latencyMs: 0, error: 'Pool not initialized' };
       }
 
-      throw error;
+      await pool.query("SELECT 1");
+      const latencyMs = Date.now() - startTime;
+
+      return { healthy: true, latencyMs };
+    } catch (err: any) {
+      return {
+        healthy: false,
+        latencyMs: Date.now() - startTime,
+        error: err.message
+      };
     }
-  }
+  };
 
-  throw lastError;
-};
+  export const isDbReady = () => dbReady;
 
-// Simple query without retry (for performance-critical operations)
-export const queryNoRetry = async (text: string, params?: any[]) => {
-  const p = getPool();
-  return p.query(text, params);
-};
-
-// Check if database is ready and responsive
-export const checkDbHealth = async (): Promise<{ healthy: boolean; latencyMs: number; error?: string }> => {
-  const startTime = Date.now();
-
-  try {
-    if (!pool || !dbReady) {
-      return { healthy: false, latencyMs: 0, error: 'Pool not initialized' };
-    }
-
-    await pool.query("SELECT 1");
-    const latencyMs = Date.now() - startTime;
-
-    return { healthy: true, latencyMs };
-  } catch (err: any) {
-    return {
-      healthy: false,
-      latencyMs: Date.now() - startTime,
-      error: err.message
-    };
-  }
-};
-
-export const isDbReady = () => dbReady;
-
-export default {
-  initializeDatabase,
-  getPool,
-  query,
-  queryNoRetry,
-  isDbReady,
-  checkDbHealth,
-  getConnectionHealth,
-  forceReconnect,
-  warmupConnection,
-};
+  export default {
+    initializeDatabase,
+    getPool,
+    query,
+    queryNoRetry,
+    isDbReady,
+    checkDbHealth,
+    getConnectionHealth,
+    forceReconnect,
+    warmupConnection,
+  };
